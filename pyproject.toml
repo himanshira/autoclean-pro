@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoclean-pro"
+version = "1.0.0"
+description = "A hardware-aware data cleaning environment with HITL governance."
+readme = "README.md"
+requires-python = ">=3.10"
+# Added the required openenv dependency here
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0,<2.0.0",
+    "scikit-learn",
+    "pydantic",
+    "requests",
+    "openenv>=0.1.13", 
+]
+
+# This satisfies the "Missing [project.scripts] server entry point" error
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["data/*.csv"]
