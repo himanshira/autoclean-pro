@@ -44,7 +44,7 @@ AutoClean-Pro is engineered for **High-Availability** and **Interoperability**:
 1. **CORS Middleware**: Enabled to allow cross-origin requests from remote AI agents and external monitoring dashboards.
 2. **Request Logging**: Custom middleware tracks agent "Think Time" and ensures that the 15-step limit is strictly enforced at the API layer.
 3. **Error Handling**: Global exception handlers prevent server crashes during "Multi-Mode" evaluation, ensuring the environment remains responsive even if an agent sends a malformed action.
-
+![System Architecture Diagram](./Architecture%20Diagram)
 
 ## **Core Functionality and Logic**
 
