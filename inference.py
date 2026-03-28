@@ -54,7 +54,9 @@ def run_task(task_id: str):
     # In a real OpenEnv, you'd call your local server endpoints here
     # For the baseline script, we can interact with the class directly or via requests
     import requests
-    base_url = "http://127.0.0.1:8000"
+    base_url = os.getenv(
+    "OPENENV_URL", 
+    "https://himanshirawat0892-autoclean-pro.hf.space")
 
     # 1. Reset
     obs = requests.post(f"{base_url}/reset?task_id={task_id}").json()
