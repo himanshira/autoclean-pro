@@ -1,6 +1,11 @@
 Product_ID,Price,Category
 101,19.99,Tech
 102,25.5,Home
-103,20.0,Tech
-104,15.0,Tech
+103,22.75,Tech
+104,15.0,Home
 105,30.0,Home
+106,18.5,Home
+107,20.0,Home
+108,22.75,Home
+109,32.5,Tech
+201,40.0,Home

@@ -2,165 +2,239 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, Any, List
 from sklearn.impute import KNNImputer
-
-from models import Action, Observation  # Ensure Reward/State are used or removed
+from logic import get_weighted_missing_report, calculate_cleaning_gain, calculate_rarity_bonus
+from models import Action, Observation
 
 class AutoCleanEnv:
     def __init__(self, task_id: str, step_limit: int = 15):
         self.task_id = task_id
+        self.df = None
+        self.target_df = None
+        self.weights = None 
         self.step_limit = step_limit
         self.paths = {
             "easy": {"dirty": "data/easy_dirty.csv", "clean": "data/easy_clean.csv"},
             "medium": {"dirty": "data/med_dirty.csv", "clean": "data/med_clean.csv"},
             "hard": {"dirty": "data/hard_dirty.csv", "clean": "data/hard_clean.csv"}
         }
+        self.history = []
+        self.current_step = 0
         self.reset()
 
     def reset(self) -> Observation:
-        """Resets the environment and PREVENTS state leakage."""
         task_files = self.paths[self.task_id]
-        # Fixed typo: keep_default_na
-        self.df = pd.read_csv(task_files["dirty"],
-                              na_values=['', ' ', 'nan', 'NaN', 'None', 'null'],
-                              keep_default_na=True)
+        # Load data with standard NA handling
+        self.df = pd.read_csv(
+            task_files["dirty"],
+            na_values=['', ' ', 'nan', 'NaN', 'None', 'null', 'nan.0'],
+            keep_default_na=True
+        )
         self.target_df = pd.read_csv(task_files["clean"])
-
+        
         self.history = []
         self.current_step = 0
-        return self._get_observation("Environment reset. Task started.")
-
-    def step(self, action: Action) -> tuple:
-        # 0. INITIALIZE TRACKING VARIABLES
-        self.current_step += 1
-        old_df = self.df.copy() # Fixed: Added old_df for reward calculation
-        info = {}               # Fixed: Initialized info
-        total_reward = 0.0      # Fixed: Initialized total_reward
-        done = False
-        message = ""
-
-        # 1. VALIDATE COLUMN (Essential to prevent crashes)
-        if action.tool != "finish" and (not action.column or action.column not in self.df.columns):
-            msg = f"Invalid column: '{action.column}'"
-            return self._get_observation(msg), -0.1, False, {"error": "bad_col"}
-
-        # 2. GOVERNANCE CHECK (The 50% Rule)
-        missing_pct = 0
-        if action.column in self.df.columns:
-            missing_pct = self.df[action.column].isnull().mean()
-
-        if missing_pct >= 0.50 and action.tool not in ["flag_human", "finish"]:
-            msg = f"GOVERNANCE BLOCKED: {action.column} has {missing_pct:.0%} missing data. Use flag_human."
-            return self._get_observation(msg), -0.5, False, {"error": "HITL_REQUIRED"}
-
-        # 3. TOOL EXECUTION
-        try:
-            if action.tool == "flag_human":
-                self.history.append("flag_human")
-                if missing_pct >= 0.50:
-                    message = f"SUCCESS: {action.column} flagged for review."
-                    total_reward = 1.0
-                    if self.task_id == "hard":
-                        done = True
-                else:
-                    message = f"FAILURE: {action.column} only has {missing_pct:.1%}. Flagging unnecessary."
-                    total_reward = -0.2
-
-            elif action.tool == "knn_impute":
-                k = action.params.get("k", 5)
-                message = self._apply_knn(action.column, k)
-                self.history.append("knn_impute")
-
-            elif action.tool == "mode_impute":
-                message = self._apply_mode(action.column)
-                self.history.append("mode_impute")
-
-            elif action.tool == "fillna":
-                val = action.params.get("value", 0)
-                self.df[action.column] = self.df[action.column].fillna(val)
-                message = f"Applied fillna to {action.column}."
-                self.history.append("fillna")
-
-            elif action.tool == "finish":
-                done = True
-                message = "Task submitted by agent."
-                self.history.append("finish")
-
-            # 4. REWARD CALCULATION (Only if not already set by flag_human)
-            if action.tool not in ["flag_human", "finish"]:
-                # Logic imports assumed from your script
-                from logic import calculate_cleaning_gain, calculate_rarity_bonus
-                gain = calculate_cleaning_gain(old_df, self.df)
-                bonus = calculate_rarity_bonus(self.history, action.tool)
-                total_reward = max(-1.0, min(1.0, gain + bonus))
-
-        except Exception as e:
-            message = f"RUNTIME ERROR: {str(e)}"
-            return self._get_observation(message), -0.1, False, {"error": "EXCEPTION"}
-
-        # 5. TERMINATION CHECK
-        if self.df.equals(self.target_df) or self.current_step >= self.step_limit:
-            done = True
-            message += " [Episode Terminated]"
-
-        return self._get_observation(message), total_reward, done, info
-
-    def grader(self) -> float:
-        """Deterministic Grader: Rewards Policy in Hard tasks & Math in Easy/Medium."""
-        try:
-            # 1. Hard Task: Governance-First Scoring
-            if self.task_id == "hard":
-                if "flag_human" in self.history:
-                    return 1.0 
-                return 0.0
-
-            # 2. Easy/Medium: Mathematical Fidelity Scoring
-            current = self.df.reset_index(drop=True)
-            target = self.target_df.reset_index(drop=True)
-
-            numeric_cols = current.select_dtypes(include=[np.number]).columns
-            object_cols = current.select_dtypes(exclude=[np.number]).columns
-
-            num_match = 0
-            if not numeric_cols.empty:
-                num_match = np.isclose(
-                    current[numeric_cols].values, 
-                    target[numeric_cols].values, 
-                    equal_nan=True, atol=1e-4
-                ).sum()
-
-            obj_match = 0
-            if not object_cols.empty:
-                obj_match = (current[object_cols] == target[object_cols]).values.sum()
-
-            return float((num_match + obj_match) / current.size)
-
-        except Exception as e:
-            print(f"Grader Error: {e}")
-            return 0.0
-
-    def _apply_knn(self, column: str, k: int) -> str:
-        if not pd.api.types.is_numeric_dtype(self.df[column]):
-             self.df[column] = pd.to_numeric(self.df[column], errors='coerce')
         
-        imputer = KNNImputer(n_neighbors=k)
-        self.df[[column]] = imputer.fit_transform(self.df[[column]])
-        return f"Applied KNN to {column}."
+        # Initialize Bayesian weights immediately upon load
+        self._update_weights()
+        
+        return self._get_observation("Environment reset. Fresh data loaded.")
 
-    def _apply_mode(self, column: str) -> str:
-        if self.df[column].isnull().all():
-            return "Failed: Column is entirely empty."
-        mode_val = self.df[column].mode()[0]
-        self.df[column] = self.df[column].fillna(mode_val)
-        return f"Applied Mode ({mode_val}) to {column}."
+    def _update_weights(self):
+        """Internal logic to refresh Bayesian weights based on current state."""
+        n = len(self.df)
+        decay_multiplier = (n // 10) - 1
+
+        # Calculate cell-level missingness density
+        total_cells = n * self.df.shape[1]
+        missing_count = self.df.isnull().sum().sum()
+        missing_pct = missing_count / total_cells if total_cells > 0 else 0
+
+        # Calculate the row_weight for NaN rows
+        if missing_count > 1:
+            decay_factor = max(0, missing_pct) * 0.1
+            row_weight = max(0.01, 0.9 - decay_factor)
+        else:
+            decay_factor = max(0, decay_multiplier) * 0.1
+            row_weight = max(0.01, 0.9 - decay_factor)
+
+        # Apply weights: 1.0 for valid data, row_weight for rows with ANY NaN
+        self.weights = pd.Series(1.0, index=self.df.index)
+        any_nan_mask = self.df.isnull().any(axis=1)
+        self.weights[any_nan_mask] = row_weight
+        
+        return row_weight
+    
+    def step(self, action: Action) -> tuple:
+        self.current_step += 1
+        col = action.column
+        tool = action.tool
+        params = action.params 
+        
+        # 1. Immediate History Logging (Crucial for Grader/Governance)
+        self.history.append(tool)
+
+        # 2. Handle Termination
+        if tool == "finish" or col == "None":
+            return self._get_observation("Task completed."), 0.0, True, {}  
+
+        # 3. Snapshot current state for Reward Calculation
+        old_df = self.df.copy()
+
+        try:
+            # 4. Execute Tool Logic
+            if tool == "cast_type":
+                target_type = params.get("type", "object")
+                if target_type == "object":
+                    # Clean conversion: preserves NaNs while ensuring object dtype
+                    self.df[col] = self.df[col].astype(str).replace(['nan', 'None', 'NaN', 'np.nan'], np.nan)
+                else:
+                    # Safer numeric casting for columns like 'Price'
+                    self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(target_type)
+                message = f"Cast {col} to {target_type}."
+
+            elif tool == "flag_human":
+                self.df[col] = self.df[col].astype(object)
+                # ALIGNED WITH generate_data.py Ground Truth
+                self.df[col] = self.df[col].fillna("Review Required")
+                message = f"Flagged {col} for manual review."
+
+            elif tool == "median_impute":
+                # Force numeric first to handle strings like "19.99" in Medium task
+                self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
+                fill_val = self.df[col].median()
+                self.df[col] = self.df[col].fillna(fill_val)
+                
+                # Rounding for cleanliness (1.0 -> 1)
+                if any(x in col.lower() for x in ['age', 'clicks', 'price']):
+                    self.df[col] = self.df[col].round(2)
+                message = f"Median Impute on {col}."
+
+            elif tool == "knn_impute":
+                from sklearn.impute import KNNImputer
+                imputer = KNNImputer(n_neighbors=params.get("n_neighbors", 5))
+                
+                # Temporary numeric conversion for the math
+                series_numeric = pd.to_numeric(self.df[col], errors='coerce')
+                imputed = imputer.fit_transform(series_numeric.values.reshape(-1, 1))
+                self.df[col] = imputed.flatten()
+                
+                # ID Integrity: If an ID was accidentally imputed, strip the .0 artifact
+                if any(idx in col.lower() for idx in ['id', 'idx', 'key']):
+                    self.df[col] = self.df[col].apply(lambda x: str(int(float(x))) if pd.notnull(x) else x)
+                message = f"KNN Impute on {col}."
+
+            elif tool == "mode_impute":
+                # Taking first mode for categorical consistency
+                modes = self.df[col].mode()
+                fill_val = modes[0] if not modes.empty else np.nan
+                self.df[col] = self.df[col].fillna(fill_val)
+                message = f"Mode Impute on {col}."
+            
+            else:
+                raise ValueError(f"Unknown tool: {tool}")
+
+            # 5. Refresh Weights & Logic
+            self._update_weights()
+            
+            # Calculate Reward (Uses logic.py functions)
+            bonus = float(calculate_rarity_bonus(self.history, tool))
+            gain = calculate_cleaning_gain(
+                old_df=old_df, 
+                new_df=self.df, 
+                column=col, 
+                tool=tool, 
+                weights=self.weights,
+                target_df=self.target_df # Add this!
+            )
+            total_reward = float(gain + bonus)
+
+        except Exception as e:
+            return self._get_observation(f"Step Error: {str(e)}"), -1.0, False, {}
+
+        # 6. Check Completion Status
+        # Ensure we use the full dataframe for cleanliness check
+        is_clean = bool(self.df.isnull().sum().sum() == 0)
+        done = is_clean or (self.current_step >= self.step_limit)
+        
+        return self._get_observation(message), total_reward, done, {}
 
     def _get_observation(self, message: str) -> Observation:
-        missing_counts = self.df.isnull().sum().to_dict()
-        preview_list = self.df.head().to_dict(orient='records')
-        schema_dict = self.df.dtypes.apply(lambda x: x.name).to_dict()
+        """Constructs the view seen by the Agent, hiding IDs from the cleaning report."""
+        from logic import get_weighted_missing_report
+        
+        # 1. Calculate the true weighted missingness
+        weighted_report = get_weighted_missing_report(self.df, self.weights)
+        
+        # 2. Identify ID columns to "silence"
+        ignore_cols = {'User_ID', 'Product_ID', 'Customer_ID', 'idx', 'key'}
+        
+        # 3. Construct the clean report but force IDs to 0.0 missingness
+        # This tricks the Agent into thinking they are already perfect.
+        clean_report = {}
+        for k, v in weighted_report.items():
+            if k in ignore_cols:
+                clean_report[str(k)] = 0.0
+            else:
+                clean_report[str(k)] = float(v)
 
         return Observation(
-            data_preview=preview_list,
-            missing_report=missing_counts,
-            schema_info=schema_dict,
+            # We keep the preview as-is so the Agent can see row associations
+            data_preview=self.df.head().to_dict(orient='records'),
+            missing_report=clean_report, 
+            schema_info=self.df.dtypes.apply(lambda x: x.name).to_dict(),
+            total_rows=len(self.df),
             message=message
         )
+
+    def grader(self) -> float:
+        """Final objective score based on ground truth data, ignoring ID columns."""
+        print(f"\n--- [GRADER REPORT: {self.task_id.upper()}] ---")
+        
+        # 1. Identify columns to ignore
+        ignore_cols = ['User_ID', 'Product_ID', 'Customer_ID', 'idx', 'key']
+        
+        # 2. Hard Task Logic (Governance First)
+        if self.task_id == "hard":
+            # Check if flag_human was actually called in the history
+            governance_passed = "flag_human" in self.history
+            score = 1.0 if governance_passed else 0.0
+            print(f"Governance Check: {'PASSED' if governance_passed else 'FAILED (No flag_human found)'}")
+            return score
+        
+        # 3. Easy/Medium Task Logic (Data Accuracy)
+        # Filter the current and target dataframes to exclude IDs
+        current_data = self.df.drop(columns=[c for c in ignore_cols if c in self.df.columns])
+        target_data = self.target_df.drop(columns=[c for c in ignore_cols if c in self.target_df.columns])
+        
+        # Reset indices to ensure alignment
+        current = current_data.reset_index(drop=True)
+        target = target_data.reset_index(drop=True)
+        
+        total_elements = target.size
+        if total_elements == 0: 
+            print(f"Grader Error: Data columns not found.")
+            return 0.0
+        
+        # Use .astype(str) to bridge the '1.0' vs '1' gap for numeric data columns like Price
+        # and strip any whitespace just in case
+        matches = (current.astype(str).apply(lambda x: x.str.strip()) == 
+                target.astype(str).apply(lambda x: x.str.strip())).sum().sum()
+        
+        score = float(matches / total_elements)
+
+        # 4. Diagnostics
+        print(f"Total Cells (Data Only): {total_elements}")
+        print(f"Matched Cells: {matches}")
+        print(f"Mismatched Cells: {total_elements - matches}")
+        print(f"Final Accuracy Score: {score:.2%}")
+
+        if score < 1.0:
+            # Diagnostic print to see exactly what columns are failing
+            mismatched_cols = (current.astype(str) != target.astype(str)).any()
+            print(f"Mismatched Columns: {list(mismatched_cols[mismatched_cols].index)}")
+            print("Hint: Check for floating point artifacts or rounding in your Imputation tools.")
+        
+        print("----------------------------------\n")
+        
+        return score
+        

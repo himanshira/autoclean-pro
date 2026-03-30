@@ -1,4 +1,18 @@
-venv/
-__pycache__/
+# .dockerignore
+.git
 .env
+venv/
+.venv/
+__pycache__/
 *.pyc
+.ipynb_checkpoints/
+
+# Extra scripts
+debug_llm.py
+test_official.py
+baseline.py
+test_api.py
+validate-submission.sh
+
+# Data (Optional)
+generate_data.py

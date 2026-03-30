@@ -11,34 +11,46 @@ pinned: false
 ## **Motivation**
 In real-world AI pipelines, data cleaning consumes **80% of engineer time**. The RL environments currently are more focused on toy games; **AutoClean-Pro** evaluates if an AI agent can autonomously transform "raw, messy" data into "ML-ready" features while adhering to strict **Data Governance** standards.
 
-Our environment tests an agent's ability to recognize when data is too "dirty" to fix and must be escalated to a human-simulating a high-stakes hardware-aware AI infrastructure.
+Our environment tests the "Decision Intelligence" of an agent knowing when to automate (impute) versus when to escalate to a human (flag), simulating a high-stakes AI infrastructure where incorrect data entry can lead to hardware-level failures.
 
 ## **Action & Observation Spaces**
 ### **Action Space (Discrete)**
 The agent interacts with the data via a suite of specialized tools:
- 1. ```fillna```: Constant value imputation
- 2. ```knn_impute```: k-Nearest Neighbours (Hardware-intensive).
- 3. ```mode_impute```: Categorical frequency imputation.
- 4. ```cast_type```: Schema alignment (e.g., String to Float).
- 5. ```drop_rows```: Limited data removal (Threshold: < 5% missing).
+ 
+ 1. ```knn_impute```: k-Nearest Neighbours (iterative, hardware-intensive).
+ 2. ```mode_impute / median_impute```: Statistical central tendency imputation.
+ 3. ```cast_type```: Schema alignment (e.g., String to Float).
  6. ```flag_human```: The Governance Tool. Required when data integrity is compromised.
  7. ```finish```: Submits the final dataset for grading.
 
 ### **Observation Space (JSON)**
 The agent receives a rich state representation:
  1. ```data_preview```: A 5-row window of the current dataframe (List of Records).
- 2. ```missing_report```: Real-time dictionary of null counts per column.
- 3. ```schema_info```:Current data types (e.g., float64, object).
- 4. ```message```: Feedback from the environment regarding the last action's success.
+ 2. ```missing_report```: A **Bayesian-weighted dictionary** of null importance per column.
+ 3. ```schema_info```:Current data types (e.g., float64, object) to prevent type-mismatch errors.
+ 4. ```message```: Direct Feedback from the environment (e.g., "Governance Blocked or "Type Cast Successful").
 
-## **Task Difficulties and Expected Behaviour**
+## **Technical Innovation: Bayesian Missingness & Governance**
+1. **Bayesian-Weighted Reporting**
+Unlike simple null counts, our ```get_weighted_missing_report``` applies importance weights to different columns. This forces the agent to prioritize high-imapct features (like Income_k or Price) over auxiliary metadata.
+2. **The 40% Governance Rule (HITL)**
+Located in ```logic.py```, this acts as a hard gatekeeper.
+- **Policy**: If a column has >= **40% missing data**, any attempt to impute is penalized (**-2.0 reward**).
+- **Requirement**: The agent must use ```flag_human``` to move the data to a "Review Required" state, mirroring real-world compliance where statistical guessing high volumes is prohibited.  
 
-![alt text](image.png)
 
 ## **Deterministic Grader Design**
 Our environment utilizes a **Dual-Criteria Grader** to ensure scientific reproducibility:
- 1. **Mathematical Fidelity**: Uses ```np.isclose``` with a 10^4 toleration to allow for floating point variance in KNN calculations.
- 2. **Governance Alignment (Hard Task)**: In the "Hard" phase, the grader specifically targets to reward the **Policy Compliance**. If the agent attempts to "guess" (impute) a column with > 50% missing data instead of flagging it for a human, the score is penalized to 0.0.
+ 1. **Mathematical Fidelity**: Compares results against ground-truth clean data. For KNN calculations, we utilize string-matching on rounded values to ensure floating-point variance accross different hardware (CPU vs TPU) does not penalize the agent.
+ 2. **Governance Alignment (Hard Task)**: In the "Hard" phase, the grader specifically checks for the "Review Required" string in the ```Survey_Response``` column. Failure to flag results in a 0.0 score for that task.
+
+## **Baseline Inference (inference.py)**
+The baseline utilizes **Zero-Shot Chain-of-Thought (COT)**. The agent is strictly governed by a decision tree provided in the SYSTEM_PROMPT:
+- **Weight >= 0.4**: Flag Human.
+- **0.15 <= Weight < 0.40**: KNN Impute.
+- **0.05 <= Weight < 0.15**: Median Impute.
+![alt text](image.png)
+
 ## **System Architecture & Middleware**
 AutoClean-Pro is engineered for **High-Availability** and **Interoperability**:
 1. **CORS Middleware**: Enabled to allow cross-origin requests from remote AI agents and external monitoring dashboards.
@@ -46,25 +58,15 @@ AutoClean-Pro is engineered for **High-Availability** and **Interoperability**:
 3. **Error Handling**: Global exception handlers prevent server crashes during "Multi-Mode" evaluation, ensuring the environment remains responsive even if an agent sends a malformed action.
 ![System Architecture Diagram](./Architecture%20Diagram)
 
-## **Core Functionality and Logic**
 
-1. **Governance Check (HITL Logic)**
-Located in ```environment.py```, this function acts as an automated "gatekeeper". If an agent calls an imputation tool on a column with a high missing percentage, the environment rejects the action and returns a ```GOVERNANCE BLOCKED``` message, forcing the agent to rethink its strategy.
-
-2. **Reward Shaping: The Dynamic Cirriculum Learning + Rarity Bonus**
-AutoClean-Pro utilizes a non-binary reward function to provide a dense signal throughout the trajectory:
+## **Reward Shaping: Dense Signal and Policy Alignment**
+We utilize a non-binary reward function to provide a dense signal throughout the trajectory, guiding the agent toward the 100% accuracy target:
      $$Reward = \Delta Quality + RarityBonus - RepetitionPenalty$$
-    1. ```Cleaning Gain```: Positive reward for reducing the total count of NaNs.
-    2. ```Rarity Bonus```: A small incentive of $+0.05$ for utilizing diverse tools, preventing "tool-spamming.
-    3. ```"Redundancy Penalty```: A negative reward of $-0.1$ if the agent tries to clean an already cleaned column.
+    1. ```Cleaning Gain (\Delta Quality)```: Positive reward proportional to the percentage of NaNs removed.
+    2. ```The 40% Governance Rule```: The agent is only rewarded (+2.0) for using flag_human.
+    3. ```Rarity Bonus```: A small incentive of $+0.05$ for utilizing diverse tools, preventing "tool-spamming".
+    4. ```Redundancy Penalty```: A negative reward (-0.1) if the agent tries to clean an already cleaned column or repeats an ineffective action.
 
-3. **Baseline Inference (baseline.py)**
-Uses **Zero-Shot Chain-of-Thought (CoT)**. The agent is prompted to:
-    1. Scan the ```missing_report```.
-    2. Check the ```schema_info```.
-    3. Apply Governance Rules (Flag vs. Impute).
-    4. Output a JSON action. 
-        
 
 ## **Setup and Usage**
 ### **Local Installation**
@@ -78,13 +80,6 @@ uv lock
 
 python -m server.app
 
-### **Reproducing Baseline Scores**
-The baseline uses a **Zero-Shot Chain-of-Thought** prompt to evaluate the data schema and apply governance rules.
-
-python baseline.py
-
-### **Target Baseline Results:**
- ![alt text](image-1.png)
 
 ## **Project Structure**
     ├── data/               # Dirty and Clean CSV pairs 
@@ -92,7 +87,7 @@ python baseline.py
     │   └── app.py          # FastAPI Entry Point (Port 7860)
     ├── environment.py      # Core RL Logic & Grader
     ├── models.py           # Pydantic V2 Schemas
-    ├── baseline.py         # Reproducible Inference Script
+    ├── inference.py         # Reproducible Inference Script
     ├── pyproject.toml      # Project Metadata & Entry Points
     └── openenv.yaml        # OpenEnv Specification File
 

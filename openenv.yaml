@@ -8,7 +8,7 @@ tasks:
   - id: "hard"
 action_space:
   type: "discrete"
-  tools: ["fillna", "drop_rows", "cast_type", "knn_impute", "mode_impute", "flag_human", "finish"]
+  tools: ["fillna", "cast_type", "knn_impute", "mode_impute", "flag_human", "finish"]
 observation_space:
   type: "json"
   fields: ["data_preview", "missing_report", "schema_info", "message"]

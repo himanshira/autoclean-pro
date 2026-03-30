@@ -2,103 +2,178 @@
 
 This script demonstrates a reproducible baseline score by running an AI agent against the 3 task levels (easy, medium, hard).
 """
+"""
+MANDATORY REQUISITES:
+API_BASE_URL: Set via environment
+MODEL_NAME: Set via environment
+HF_TOKEN: Set via environment
+"""
 
 import os 
 import json
-import openai
-from typing import Dict, Any
+import re
+import requests
+from typing import Dict, Any, List, Optional
+from openai import OpenAI
 from models import Action
 from dotenv import load_dotenv
 
-load_dotenv() # This looks for the .env file and loads the key
-# Setup Client (Reads from environment variables as per requirements)
-client = openai.OpenAI(api_key=os.getenv("OPEN_API_KEY"))
+load_dotenv() 
 
-def get_agent_decision(observation: Dict[str, Any]) -> Action:
-    """Consults the LLM to decide the next cleaning step.
-    
-    Args:
-        observation: The current state summary from the environment.
-    Returns:
-        A validated Action object.    
-    """
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY = os.getenv("HF_TOKEN") # Must use HF_TOKEN as per requirements
+MODEL_NAME = os.getenv("MODEL_NAME")
+# Use the OpenEnv URL from the environment or default to the Space's own address
+OPENENV_URL = os.getenv("OPENENV_URL", "http://localhost:7860") 
+
+# Initialize the client exactly as required
+client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+
+SYSTEM_PROMPT = """You are an expert Data Engineering Agent.
+Your goal is 100% data cleanliness and strict policy adherence for DATA columns.
+
+[OPERATIONAL POLICY]
+1. IDENTIFIERS: Columns like 'User_ID', 'Product_ID', and 'Customer_ID' are handled by the system. You should focus ONLY on columns with missing values in the 'missing_report'.
+2. DATA TYPES: 
+   - 'Age', 'Clicks', 'Price', 'Income_k' must be numeric.
+   - 'Category', 'Survey_Response' are categorical/objects.
+3. TERMINATION: If all values in the 'missing_report' are 0.0, your ONLY action must be 'finish'.
+
+[WEIGHTED MISSINGNESS DECISION TREE]
+The 'missing_report' uses Bayesian weighting. Follow these thresholds strictly:
+- Value >= 0.40 (40%): GOVERNANCE ALERT. You MUST use 'flag_human'. (This will set values to "Review Required").
+- 0.15 <= Value < 0.40: Use 'knn_impute'.
+- 0.05 <= Value < 0.15: Use 'median_impute'.
+- Value < 0.05: Use 'mode_impute' for categories or 'median_impute' for numbers.
+
+[CRITICAL RULES]
+- PRICE COLUMN: Even if 'Price' is an 'object', use 'median_impute'. The environment will automatically handle the numeric cast and calculate the median.
+- CATEGORY COLUMN: Use 'mode_impute' for missing categorical values.
+- REPETITION: If an action does not reduce the missingness in the 'missing_report', do not repeat it. Try a different tool or move to another column.
+- FINISH: When the report shows 0.0 for all relevant data columns, you must call 'finish' to submit the task and calculate your accuracy score."""
+
+import json
+import re
+
+def get_agent_decision(observation: Dict[str, Any], prev_message: str = "") -> Action:
+    # ROunding logic: we round to 3 decimal places to keep precision for Bayesian weights
+    # but remove scientiific notation noise like 1e-16
+    raw_report = observation.get('missing_report', {})
+    clean_report = {k: round(float(v), 3) for k, v in raw_report.items()} 
     prompt = f"""
-    You are a Data Governance Agent. 
-    STATUS: {observation['missing_report']}
-
-    RULES:
-    1. If a column has 0 NaNs, DO NOT TOUCH IT. Move to the next column.
-    2. If a column has >= 50% missing values (e.g., 4 or more), you MUST use 'flag_human'. 
-    3. Use 'knn_impute' ONLY for numeric columns with < 50% missing values.
-    4. Only use 'finish' when EVERY column in the STATUS shows 0.
+    CURRENT DATA STATE:
+    - Data Preview: {json.dumps(observation.get('data_preview', []), indent=2)}
+    - Missingness Report (Weighted): {json.dumps(observation.get('missing_report', {}), indent=2)}
+    - Schema Info (Current Types): {json.dumps(observation.get('schema_info', {}), indent=2)}
     
-    Current Goal: Scan STATUS, apply rules, and output JSON.
+    PREVIOUS FEEDBACK: {prev_message}
     
-    JSON ONLY: {{"tool": "...", "column": "...", "params": {{}} }}
+    TASK: Determine the next best action. 
+    If you see a column name like 'User_ID' that is currently 'float64', your FIRST action must be cast_type to 'object'.
+    
+    Respond ONLY with a JSON object:
+    {{
+        "tool": "tool_name",
+        "column": "column_name",
+        "params": {{"key": "value"}}
+    }}
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini", 
-        messages=[{"role": "system", "content": "You are a precise data engineering agent."},
-                  {"role": "user", "content": prompt}],
-        response_format = {"type": "json_object"}          
-    )
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME, 
+                messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                          {"role": "user", "content": prompt}],
+                temperature=0.0
+            )
+            
+            content = response.choices[0].message.content
+            
+            # IMPROVED REGEX: Find the first { and the last } 
+            # This ignores "Extra data" like comments or second blocks.
+            json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+            
+            if json_match:
+                json_str = json_match.group(1).strip()
+                
+                # REPAIR: If the LLM outputted two JSON blocks, 
+                # json.loads will fail. We take only the FIRST one.
+                try:
+                    raw_json = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # If it fails, try to find the first complete object
+                    # by looking for the first balanced closing brace
+                    depth = 0
+                    for i, char in enumerate(json_str):
+                        if char == '{': depth += 1
+                        elif char == '}': depth -= 1
+                        if depth == 0:
+                            json_str = json_str[:i+1]
+                            break
+                    raw_json = json.loads(json_str)
 
-    decision = json.loads(response.choices[0].message.content)
-    return Action(**decision)
+                # --- REPAIR WRAPPER / KEY BUGS ---
+                if "actions" in raw_json and isinstance(raw_json["actions"], list):
+                    raw_json = raw_json["actions"][0]
+                
+                valid_tools = ["knn_impute", "median_impute", "mode_impute", "flag_human", "cast_type", "finish"]
+                if "tool" not in raw_json:
+                    for t in valid_tools:
+                        if t in raw_json and isinstance(raw_json[t], dict):
+                            nested = raw_json[t]
+                            raw_json = {"tool": t, "column": nested.get("column"), "params": nested.get("params", {})}
+                            break
+
+                return Action(**raw_json)
+            
+        except Exception as e:
+            print(f"Final Repair Attempt Failed: {e}")
+            if attempt == 1: return Action(tool="finish", column="None", params={})
 
 def run_task(task_id: str):
-    """Runs a full episode for a specific task difficulty."""
-    print(f"--- Starting Task: {task_id.upper()} ---")
+    print(f"\n{'='*15} STARTING TASK: {task_id.upper()} {'='*15}")
+    res_data = requests.post(f"{OPENENV_URL}/reset?task_id={task_id}").json()
+    obs = res_data.get("observation", {})
+    
+    # Track the environment message to pass back to the agent for reflection
+    last_msg = obs.get("message", "")
+    
+    step_count = 0
+    MAX_STEPS = 15
+    
+    while step_count < MAX_STEPS:
+        step_count += 1
+        
+        # Pass the last_msg so the agent knows if it failed previously
+        # Inside run_task while loop:
+        action = get_agent_decision(obs, last_msg)
+        print(f"DEBUG: Current Type of {action.column} is {obs.get('schema_info', {}).get(action.column)}")
+        
+        print(f"Step {step_count}: Executing {action.tool} on '{action.column}'")
+        
+        res = requests.post(f"{OPENENV_URL}/step?task_id={task_id}", json=action.model_dump()).json()
+        
+        obs = res.get('observation', {})
+        last_msg = obs.get('message', "Action completed.")
+        
+        if res.get('done', False) or action.tool == "finish":
+            print(f"Task finished at step {step_count}. Reason: {last_msg}")
+            break
 
-    # In a real OpenEnv, you'd call your local server endpoints here
-    # For the baseline script, we can interact with the class directly or via requests
-    import requests
-    base_url = os.getenv(
-    "OPENENV_URL", 
-    "https://himanshirawat0892-autoclean-pro.hf.space")
+    score_res = requests.get(f"{OPENENV_URL}/grader?task_id={task_id}").json()
+    score = score_res.get('score', 0.0)
+    print(f"--- {task_id.upper()} FINAL SCORE: {score:.2%} ---")
+    return score
 
-    # 1. Reset
-    obs = requests.post(f"{base_url}/reset?task_id={task_id}").json()
-    done = False
-    total_reward = 0
-
-    while not done:
-        # Calculate percentage for logs
-        report = obs['missing_report']
-        total_rows = len(obs['data_preview'])
-        status_str = ", ".join([f"{col}: {count} NaN" for col, count in report.items()])
-        print(f"Current Status: {status_str}")
-        # 2. Agent Decides
-        action = get_agent_decision(obs)
-        print(f"Agent Action: {action.tool} on {action.column}")
-
-        # 3. Step 
-        # Replace your #3 Step block in baseline.py with this:
-        response = requests.post(
-            f"{base_url}/step?task_id={task_id}",
-            json=action.model_dump()
-        )
-
-        if response.status_code != 200:
-            print(f"SERVER ERROR: {response.text}")
-            break # Stop the loop if the server crashed
-
-        data = response.json()
-        obs = data['observation']
-        #total_reward += data['reward']
-        done = data['done']
-
-    # 4. Final Score (Grader)
-    final_score = requests.get(f"{base_url}/grader?task_id={task_id}").json()
-    print(f"Result: {final_score['score']:.2%}")   
-    return final_score['score']
-
-if __name__=="__main__":
-    # Ensure server is running before executing this
-    scores = {}
+if __name__ == "__main__":
+    results = {}
     for level in ["easy", "medium", "hard"]:
-        scores[level] = run_task(level)
-    print("\n--- FINAL REPRODUCIBLE SCORES ---")
-    print(json.dumps(scores, indent=2))
-         
+        results[level] = run_task(level)
+    
+    print("\n" + "="*40)
+    print("FINAL SUMMARY REPORT")
+    for lvl, sc in results.items():
+        print(f" {lvl.capitalize()}: {sc:.2%}")
+    print("="*40)
