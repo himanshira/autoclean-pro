@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv() 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") # Must use HF_TOKEN as per requirements
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")# Must use HF_TOKEN as per requirements
 MODEL_NAME = os.getenv("MODEL_NAME")
 # Use the OpenEnv URL from the environment or default to the Space's own address
 OPENENV_URL = os.getenv("OPENENV_URL", "http://localhost:7860") 
