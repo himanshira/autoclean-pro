@@ -31,10 +31,10 @@ The agent receives a rich state representation:
  4. ```message```: Direct Feedback from the environment (e.g., "Governance Blocked or "Type Cast Successful").
 
 ## **Technical Innovation: Bayesian Missingness & Governance**
-1. **Bayesian-Weighted Reporting**
+- **Bayesian-Weighted Reporting**
 We apply a Bayesian weight to null counts to prevent "Small-Dataset Noise." In micro-datasets, a single missing value can disproportionately skew the "Data Health Score." Our weighted approach ensures the agent isn't "over-reacting" to isolated gaps in smaller columns.
 
-2. **The 40% Governance Rule (HITL)**
+- **The 40% Governance Rule (HITL)**
 Located in ```logic.py```, this acts as a hard gatekeeper.
 - **Policy**: If a column has >= **40% missing data**, any attempt to impute is penalized (**-2.0 reward**).
 - **Requirement**: The agent must use ```flag_human``` to move the data to a "Review Required" state, mirroring real-world compliance where statistical guessing high volumes is prohibited.  
