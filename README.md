@@ -25,14 +25,15 @@ The agent interacts with the data via a suite of specialized tools:
 
 ### **Observation Space (JSON)**
 The agent receives a rich state representation:
- 1. ```data_preview```: A 5-row window of the current dataframe (List of Records).
+ 1. ```data_preview```: A 10-row window of the current dataframe (List of Records).
  2. ```missing_report```: A **Bayesian-weighted dictionary** of null importance per column.
  3. ```schema_info```:Current data types (e.g., float64, object) to prevent type-mismatch errors.
  4. ```message```: Direct Feedback from the environment (e.g., "Governance Blocked or "Type Cast Successful").
 
 ## **Technical Innovation: Bayesian Missingness & Governance**
 1. **Bayesian-Weighted Reporting**
-Unlike simple null counts, our ```get_weighted_missing_report``` applies importance weights to different columns. This forces the agent to prioritize high-imapct features (like Income_k or Price) over auxiliary metadata.
+We apply a Bayesian weight to null counts to prevent "Small-Dataset Noise." In micro-datasets, a single missing value can disproportionately skew the "Data Health Score." Our weighted approach ensures the agent isn't "over-reacting" to isolated gaps in smaller columns.
+
 2. **The 40% Governance Rule (HITL)**
 Located in ```logic.py```, this acts as a hard gatekeeper.
 - **Policy**: If a column has >= **40% missing data**, any attempt to impute is penalized (**-2.0 reward**).
@@ -52,10 +53,12 @@ The baseline utilizes **Zero-Shot Chain-of-Thought (COT)**. The agent is strictl
 ![alt text](image.png)
 
 ## **System Architecture & Middleware**
-AutoClean-Pro is engineered for **High-Availability** and **Interoperability**:
+AutoClean-Pro is engineered for **High-Availability** and **Interoperability** with a Hardware-Aware philosophy, specifically optimized for high-throughput, low-latency execution on constrained **2 vCPU / 8GB RAM** environments.:
 1. **CORS Middleware**: Enabled to allow cross-origin requests from remote AI agents and external monitoring dashboards.
 2. **Request Logging**: Custom middleware tracks agent "Think Time" and ensures that the 15-step limit is strictly enforced at the API layer.
 3. **Error Handling**: Global exception handlers prevent server crashes during "Multi-Mode" evaluation, ensuring the environment remains responsive even if an agent sends a malformed action.
+4. **Green AI Efficiency**: By minimizing the computational footprint of the cleaning agents, we reduce the energy overhead per data repair task.
+5. **Modular API Design**: Utilizing a FastAPI backend to ensure that environment resets and step executions are decoupled from the heavy LLM inference.
 ![System Architecture Diagram](./Architecture%20Diagram)
 
 
@@ -70,15 +73,16 @@ We utilize a non-binary reward function to provide a dense signal throughout the
 
 ## **Setup and Usage**
 ### **Local Installation**
-#Install dependencies using uv (recommended)
-
-uv sync
-uv lock
+    #Install dependencies using uv (recommended)
+    uv sync
+    uv lock
 
 ### **Running the Environment Server**
-#Start the OpenEnv-compliant FastAPI server
+    #Start the OpenEnv-compliant FastAPI server
+    python -m server.app.py
 
-python -m server.app
+### **Running the Inference**
+    python inference.py
 
 
 ## **Project Structure**
