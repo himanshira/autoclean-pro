@@ -62,10 +62,10 @@ AutoClean-Pro is engineered for **High-Availability** and **Interoperability**:
 ## **Reward Shaping: Dense Signal and Policy Alignment**
 We utilize a non-binary reward function to provide a dense signal throughout the trajectory, guiding the agent toward the 100% accuracy target:
      $$Reward = \Delta Quality + RarityBonus - RepetitionPenalty$$
-    1. ```Cleaning Gain (\Delta Quality)```: Positive reward proportional to the percentage of NaNs removed.
-    2. ```The 40% Governance Rule```: The agent is only rewarded (+2.0) for using flag_human.
-    3. ```Rarity Bonus```: A small incentive of $+0.05$ for utilizing diverse tools, preventing "tool-spamming".
-    4. ```Redundancy Penalty```: A negative reward (-0.1) if the agent tries to clean an already cleaned column or repeats an ineffective action.
+- ```Cleaning Gain (\Delta Quality)```: Positive reward proportional to the percentage of NaNs removed.
+- ```The 40% Governance Rule```: The agent is only rewarded (+2.0) for using flag_human.
+-  ```Rarity Bonus```: A small incentive of $+0.1$ for utilizing diverse tools, preventing "tool-spamming".
+-  ```Redundancy Penalty```: A negative reward (-0.1) if the agent tries to clean an already cleaned column or repeats an ineffective action.
 
 
 ## **Setup and Usage**
