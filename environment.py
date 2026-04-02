@@ -101,18 +101,10 @@ class AutoCleanEnv:
                 message = f"Cast {col} to {target_type}."
 
             elif tool == "median_impute":
-                if self.df[col].dtype == object:
-                    message = f"ERROR: {col} is categorical. Use mode_impute."
-                else:
-                    fill_val = self.df[col].median()
-                    # Rounding logic to prevent floating point artifacts
-                    self.df[col] = self.df[col].fillna(round(float(fill_val), 2))
-                    
-                    if 'age' in col.lower():
-                        self.df[col] = pd.to_numeric(self.df[col]).round(0).astype('Int64')
-                    else:
-                        self.df[col] = self.df[col].astype(float).round(2)
-                    message = f"Median Impute on {col}."
+                # Use the raw median without rounding
+                fill_val = self.df[col].median()
+                self.df[col] = self.df[col].fillna(fill_val)
+                message = f"Median Impute on {col} with raw precision."
 
             elif tool == "mode_impute":
                 fill_val = self.df[col].mode()[0]
@@ -122,26 +114,18 @@ class AutoCleanEnv:
                 
             elif tool == "knn_impute":
                 from sklearn.impute import KNNImputer
-                # Convert to numeric before KNN to ensure no strings break the imputer
+                # Convert to numeric but keep the raw float precision
                 temp_series = pd.to_numeric(self.df[col], errors='coerce').values.reshape(-1, 1)
                 imputer = KNNImputer(n_neighbors=params.get("n_neighbors", 5))
                 imputed = imputer.fit_transform(temp_series)
                 self.df[col] = imputed.flatten()
                 
-                # --- CRITICAL REFINEMENT ---
-                if 'age' in col.lower():
-                    # Force to Int64 to match "25" vs "25.0"
-                    self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(0).astype('Int64')
-                elif any(x in col.lower() for x in ['price', 'clicks']):
-                    # Force to float and round to 2 decimal places vectorially
-                    # This prevents floating point artifacts like 10.00000000004
-                    self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(2)
-                
-                # For IDs that are mistakenly numeric
+                # REMOVE ALL ROUNDING FOR AGE/PRICE
+                # Only keep the object-to-string cast for IDs
                 if any(x in col.lower() for x in ['id', 'idx', 'key']):
                     self.df[col] = self.df[col].apply(lambda x: str(int(float(x))) if pd.notnull(x) else x)
-            
-            message = f"KNN Impute on {col}."    
+                
+                message = f"KNN Impute on {col} with raw precision."
 
             # 5. Post-execution updates
             self._update_weights()
