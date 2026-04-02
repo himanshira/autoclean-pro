@@ -87,10 +87,8 @@ class AutoCleanEnv:
         try:
             # 4. Execute Tool Logic (flag_human at top for priority)
             if tool == "flag_human":
-                self.df[col] = self.df[col].astype(object)
-                # ALIGNED WITH generate_data.py Ground Truth
-                self.df[col] = self.df[col].fillna("Review Required")
-                message = f"Flagged {col} for manual review."
+                message = f"Column {col} flagged for manual review due to high missingness."
+                
 
             elif tool == "cast_type":
                 target_type = params.get("type", "object")
@@ -104,38 +102,46 @@ class AutoCleanEnv:
 
             elif tool == "median_impute":
                 if self.df[col].dtype == object:
-                    # Categorical protection: uses Mode if Agent mis-calls Median
-                    fill_val = self.df[col].mode()[0]
-                    self.df[col] = self.df[col].fillna(fill_val)
+                    message = f"ERROR: {col} is categorical. Use mode_impute."
                 else:
-                    # Numeric logic
                     fill_val = self.df[col].median()
-                    self.df[col] = self.df[col].fillna(round(fill_val, 2))
+                    # Rounding logic to prevent floating point artifacts
+                    self.df[col] = self.df[col].fillna(round(float(fill_val), 2))
                     
-                    # Specific type-casting to match Ground Truth
                     if 'age' in col.lower():
-                        self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(0).astype('Int64')
-                    elif any(x in col.lower() for x in ['price', 'clicks']):
-                        self.df[col] = self.df[col].apply(lambda x: round(float(x), 2) if pd.notnull(x) else x)
+                        self.df[col] = pd.to_numeric(self.df[col]).round(0).astype('Int64')
+                    else:
+                        self.df[col] = self.df[col].astype(float).round(2)
+                    message = f"Median Impute on {col}."
 
-                message = f"Median Impute on {col}."
-
+            elif tool == "mode_impute":
+                fill_val = self.df[col].mode()[0]
+                # Ensure no trailing spaces or weird types
+                self.df[col] = self.df[col].fillna(str(fill_val).strip())
+                message = f"Mode Impute on {col}."
+                
             elif tool == "knn_impute":
                 from sklearn.impute import KNNImputer
+                # Convert to numeric before KNN to ensure no strings break the imputer
                 temp_series = pd.to_numeric(self.df[col], errors='coerce').values.reshape(-1, 1)
-                imputed = KNNImputer(n_neighbors=params.get("n_neighbors", 5)).fit_transform(temp_series)
+                imputer = KNNImputer(n_neighbors=params.get("n_neighbors", 5))
+                imputed = imputer.fit_transform(temp_series)
                 self.df[col] = imputed.flatten()
                 
-                # Correct type-casting for KNN results
+                # --- CRITICAL REFINEMENT ---
                 if 'age' in col.lower():
+                    # Force to Int64 to match "25" vs "25.0"
                     self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(0).astype('Int64')
                 elif any(x in col.lower() for x in ['price', 'clicks']):
-                    self.df[col] = self.df[col].apply(lambda x: round(float(x), 2) if pd.notnull(x) else x)
+                    # Force to float and round to 2 decimal places vectorially
+                    # This prevents floating point artifacts like 10.00000000004
+                    self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(2)
                 
+                # For IDs that are mistakenly numeric
                 if any(x in col.lower() for x in ['id', 'idx', 'key']):
                     self.df[col] = self.df[col].apply(lambda x: str(int(float(x))) if pd.notnull(x) else x)
-                
-                message = f"KNN Impute on {col}."
+            
+            message = f"KNN Impute on {col}."    
 
             # 5. Post-execution updates
             self._update_weights()

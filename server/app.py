@@ -32,9 +32,9 @@ BASELINE_RESULTS = {
     "easy": 0.8667,
     "medium": 0.8667,
     "hard": 1.0,
-    "model": "gpt-4o-mini",
-    "status": "Reproduced",
-    "date": "2026-03-26"
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "status": "In-Progress",
+    "date": "2026-04-02"
 }
 
 @app.get("/")

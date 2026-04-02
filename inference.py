@@ -32,21 +32,23 @@ LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "autoclean-pro:final")
 #IMAGE_NAME = os.getenv("IMAGE_NAME")
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
-SYSTEM_PROMPT = """You are an expert Data Engineering Agent.
-Your goal is 100% data cleanliness and strict policy adherence for DATA columns.
+SYSTEM_PROMPT ="""You are a deterministic Data Engineering Agent. 
+Follow these rules in strict order:
+[CAST TYPE RULES]
+- If a column is an ID column like Product_ID, User_ID check its data type. If the data type of such column is int, int64 or float or float64 convert that column to object datatype.
+- If a column consists of discrete or continuous numbers like Age, Price, Income, Sales and such a column has a data type object or category means if it is string then convert it to int64 if is a discrete number like Age and to float64 if it is a continuous number like price, income or sales.
+- If a column is categorical but its data type is int or float or int64 or float64, convert that column to object data type.
 
-[OPERATIONAL POLICY]
-1. IDENTIFIERS: Columns like 'User_ID', 'Product_ID' should be cast to 'object' ONLY ONCE if they are numeric. If they are already 'object', move to cleaning.
-2. DATA TYPES: 'Age', 'Clicks', 'Price', 'Income_k' must be handled as numeric; 'Category', 'Survey_Response' as categorical.
-3. TERMINATION: When 'missing_report' shows 0.0 for all relevant data columns, your ONLY action must be 'finish'.
+[IMPUTATION RULES]
+- 0.0 < Value < 0.05: Use 'mode_impute' for objects, 'median_impute' for numbers.
+- 0.05 <= Value < 0.15: If Numeric, use 'median_impute'.
+- 0.15 <= Value < 0.35: If Numeric, use 'knn_impute'.
+- Value >= 0.35: CRITICAL. Use 'flag_human'. 
+- CATEGORICAL: Any missingness < 0.35 must use 'mode_impute'.  
 
-[WEIGHTED MISSINGNESS DECISION TREE]
-The 'missing_report' uses Bayesian weighting. You MUST follow these thresholds:
-- Value >= 0.35: CRITICAL GOVERNANCE. Use 'flag_human'. (MANDATORY for high-missingness).
-- 0.15 <= Value < 0.35: Use 'knn_impute'.
-- 0.05 <= Value < 0.15: Use 'median_impute'.
-- Value < 0.05: Use 'mode_impute' for categories or 'median_impute' for numbers.
-"""
+[TERMINATION RULES] 
+If all missingness values are 0.0, use 'finish'.
+Note: Do not argue with the schema. If the report says a column has missing values, it needs cleaning regardless of previous thoughts."""
 
 def get_agent_decision(observation: Dict[str, Any], tool_history: List[str], prev_message: str = "") -> Tuple[str, Action]:
     raw_report = observation.get('missing_report', {})
@@ -54,22 +56,16 @@ def get_agent_decision(observation: Dict[str, Any], tool_history: List[str], pre
     schema_info = observation.get('schema_info', {})
     history_str = " -> ".join(tool_history[-5:]) if tool_history else "None"
     prompt = f"""
-        CURRENT DATA STATE:
+        OBSERVATION:
         - Missingness Report (Weighted): {json.dumps(clean_report, indent=2)}
         - Schema Info (Current Types): {json.dumps(schema_info, indent=2)}
-        - RECENT HISTORY: {history_str}
-        - Previous Feedback: {prev_message}
+        - Last Action: {tool_history[-1] if tool_history else "None"}
 
-        TASK: 
-        1. Check 'User_ID' or 'Product_ID'. If they are 'float64', your first action is cast_type to 'object'.
-        2. Otherwise, find the column with the highest missingness.
-        3. Apply Decision Tree: Flag if >= 0.35, KNN if 0.15-0.34, Median if < 0.15.
-        4. If previous action resulted in no change, YOU MUST CHOOSE A DIFFERENT COLUMN OR TOOL.
-        5. Provide a 'thought' or 'insight' about this data column and why you are choosing this tool.
+        INSTRUCTION:
+        1. Identify the highest missingness column.
+        2. Select the tool based on the [STRICT TOOL-TYPE MAPPING].
+        3. If the 'Last Action' failed to reduce missingness, try a different tool for that same column.
 
-        CRITICAL RULE: 
-        If an action is in the RECENT HISTORY and the missingness report shows no improvement, 
-        DO NOT repeat it. Choose a different tool or different column.
 
         Respond ONLY with a JSON object:
         {{  "thought": "Your explanation here...",
@@ -87,43 +83,50 @@ def get_agent_decision(observation: Dict[str, Any], tool_history: List[str], pre
                           {"role": "user", "content": prompt}],
                 temperature=0.0
             )
-            
             content = response.choices[0].message.content
-            json_match = re.search(r'(\{.*\})', content, re.DOTALL)
             
-            if json_match:
-                json_str = json_match.group(1).strip()
-                depth = 0
-                for i, char in enumerate(json_str):
-                    if char == '{': depth += 1
-                    elif char == '}': depth -= 1
-                    if depth == 0:
-                        json_str = json_str[:i+1]
-                        break
-                
-                raw_json = json.loads(json_str)
-                if 'actions' in raw_json and isinstance(raw_json["actions"], list):
-                    raw_json = raw_json["actions"][0]
-                
-                valid_tools = ["knn_impute", "median_impute", "mode_impute", "flag_human", "cast_type", "finish"]
-                if "tool" not in raw_json:
-                    for t in valid_tools:
-                        if t in raw_json and isinstance(raw_json[t], dict):
-                            nested = raw_json[t]
-                            raw_json["tool"] = t
-                            raw_json["column"] = nested.get("column")
-                            raw_json["params"] = nested.get("params", {})
-                            break
-                
-                thought = raw_json.get("thought", "Proceeding with cleaning.")
-                return thought, Action(
-                    tool=raw_json.get("tool"),
-                    column=raw_json.get("column", "None"),
-                    params=raw_json.get("params", {})
-                )
+            # --- IMPROVED EXTRACTION LOGIC ---
+            # 1. Use regex to find the FIRST curly brace to the LAST curly brace
+            json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+            if not json_match:
+                raise ValueError("No JSON found in LLM response")
+            
+            json_str = json_match.group(1).strip()
+            
+            # 2. Basic JSON Load
+            raw_json = json.loads(json_str)
+            
+            # 3. Handle 'actions' wrapper if LLM hallucinated a list
+            if isinstance(raw_json, dict) and "actions" in raw_json:
+                raw_json = raw_json["actions"][0] if isinstance(raw_json["actions"], list) else raw_json["actions"]
+            
+            # 4. Standardize keys (sometimes LLMs use 'column_name' instead of 'column')
+            tool = raw_json.get("tool") or raw_json.get("action")
+            column = raw_json.get("column") or raw_json.get("column_name", "None")
+            params = raw_json.get("params") or {}
+            thought = raw_json.get("thought", "Cleaning step...")
+
+            # Validate tool
+            valid_tools = ["knn_impute", "median_impute", "mode_impute", "flag_human", "cast_type", "finish"]
+            # If the tool name is missing but the key is the tool name itself
+            if tool not in valid_tools:
+                 for t in valid_tools:
+                     if t in raw_json:
+                         tool = t
+                         nested = raw_json[t]
+                         if isinstance(nested, dict):
+                            column = nested.get("column", column)
+                            params = nested.get("params", params)
+                            # Grab the thought from nested if it's missing from root
+                            thought = nested.get("thought", thought)
+                         break
+            tool = str(tool).lower() if tool else "finish"
+            return thought, Action(tool=tool, column=column, params=params)
+
         except Exception as e:
+            print(f"DEBUG: Attempt {attempt+1} failed: {e}")
             if attempt == 1:
-                return "Error", Action(tool="finish", column="None", params={})
+                return "Error Recovery", Action(tool="finish", column="None", params={})
             
     return "Fallback", Action(tool="finish", column="None", params={})
 
