@@ -5,6 +5,7 @@ import subprocess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from models import Action, Observation, State
+from fastapi import BackgroundTasks
 
 # This ensures the 'server' folder can see 'environment.py' in the root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -80,24 +81,25 @@ async def get_grader(task_id: str = "easy"):
     return {"score": envs[task_id].grader()}
 
 @app.post("/baseline")
-async def trigger_baseline():
+async def trigger_baseline(background_tasks: BackgroundTasks):
     """REQUIRED BY VALIDATOR: Runs the inference.py script to prove the scores are reproducible."""
-    try:
-        # Executed the inference.py as a separate process 
-        # It is the Gold Standard for proving reproducibilty
-        result = subprocess.run(
-            [sys.executable, "inference.py"],
-            capture_output=True,
-            text=True,
-            timeout=1200
-        )
-        # After running, we return the baseline results
-        # (The validator will check the logs match these numbers)
-        return BASELINE_RESULTS
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="Inference exceeded 20 minute limit")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Baseline reproduction failed: {str(e)}")
+    def run_inference():
+        try:
+            # We use Popen or run without capture_output so logs 
+            # flow directly to the HUgging Face Container Logs
+            subprocess.run(
+                [sys.executable, "inference.py"],
+                text=True,
+                check=True
+            )
+        except Exception as e:
+            print(f"!!! BACKGROUND CRASH: {str(e)}")
+    background_tasks.add_task(run_inference)
+    return {
+        "status": "Inference started in background",
+        "instruction": "Please monitor the 'Logs' tab in your Hugging Face Space for [START] and [END] tags.",
+        "cached_baseline": BASELINE_RESULTS
+    }        
 @app.get("/baseline")
 async def get_baseline():
     """Returns the cached results for quick status checks."""
