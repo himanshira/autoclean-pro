@@ -17,7 +17,9 @@ dependencies = [
     "scikit-learn",
     "pydantic",
     "requests",
-    "openenv>=0.1.13", 
+    "openenv>=0.1.13",
+    "openai>=2.30.0",
+    "python-dotenv>=1.2.2",
 ]
 
 # This satisfies the "Missing [project.scripts] server entry point" error

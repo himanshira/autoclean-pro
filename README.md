@@ -47,10 +47,11 @@ Our environment utilizes a **Dual-Criteria Grader** to ensure scientific reprodu
 
 ## **Baseline Inference (inference.py)**
 The baseline utilizes **Zero-Shot Chain-of-Thought (COT)**. The agent is strictly governed by a decision tree provided in the SYSTEM_PROMPT:
-- **Weight >= 0.4**: Flag Human.
-- **0.15 <= Weight < 0.40**: KNN Impute.
+- **Weight >= 0.35**: Flag Human.
+- **0.15 <= Weight < 0.35**: KNN Impute.
 - **0.05 <= Weight < 0.15**: Median Impute.
-![alt text](image.png)
+
+The agent outputs its thinking process that why it chose a particular tool to perform a particular action to clean the dataset. Basis that the agent is penalized or rewarded. 
 
 ## **System Architecture & Middleware**
 AutoClean-Pro is engineered for **High-Availability** and **Interoperability** with a Hardware-Aware philosophy, specifically optimized for high-throughput, low-latency execution on constrained **2 vCPU / 8GB RAM** environments.:

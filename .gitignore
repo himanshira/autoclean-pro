@@ -3,7 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-
+*.egg-info/
 debug_llm.py
 test_official.py
 baseline.py

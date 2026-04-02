@@ -23,6 +23,8 @@ class AutoCleanEnv:
 
     def reset(self) -> Observation:
         task_files = self.paths[self.task_id]
+        # Silencing the downcasting warning globally for clean logs
+        pd.set_option('future.no_silent_downcasting', True)
         # Load data with standard NA handling
         self.df = pd.read_csv(
             task_files["dirty"],
@@ -37,7 +39,7 @@ class AutoCleanEnv:
         # Initialize Bayesian weights immediately upon load
         self._update_weights()
         
-        return self._get_observation("Environment reset. Fresh data loaded.")
+        return self._get_observation("Environment reset.")
 
     def _update_weights(self):
         """Internal logic to refresh Bayesian weights based on current state."""
@@ -73,16 +75,24 @@ class AutoCleanEnv:
         # 1. Immediate History Logging (Crucial for Grader/Governance)
         self.history.append(tool)
 
-        # 2. Handle Termination
-        if tool == "finish" or col == "None":
-            return self._get_observation("Task completed."), 0.0, True, {}  
+        # 2. Handle Termination or Invalid Columns
+        # We cast the 'done' boolean to a standard Python bool to avoid FastAPI serialization errors
+        if tool == "finish" or col == "None" or col not in self.df.columns:
+            is_finished = bool(tool == "finish")
+            return self._get_observation("Step skipped or Task completed."), 0.0, is_finished, {}
 
         # 3. Snapshot current state for Reward Calculation
         old_df = self.df.copy()
 
         try:
-            # 4. Execute Tool Logic
-            if tool == "cast_type":
+            # 4. Execute Tool Logic (flag_human at top for priority)
+            if tool == "flag_human":
+                self.df[col] = self.df[col].astype(object)
+                # ALIGNED WITH generate_data.py Ground Truth
+                self.df[col] = self.df[col].fillna("Review Required")
+                message = f"Flagged {col} for manual review."
+
+            elif tool == "cast_type":
                 target_type = params.get("type", "object")
                 if target_type == "object":
                     # Clean conversion: preserves NaNs while ensuring object dtype
@@ -92,71 +102,60 @@ class AutoCleanEnv:
                     self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(target_type)
                 message = f"Cast {col} to {target_type}."
 
-            elif tool == "flag_human":
-                self.df[col] = self.df[col].astype(object)
-                # ALIGNED WITH generate_data.py Ground Truth
-                self.df[col] = self.df[col].fillna("Review Required")
-                message = f"Flagged {col} for manual review."
-
             elif tool == "median_impute":
-                # Force numeric first to handle strings like "19.99" in Medium task
-                self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
-                fill_val = self.df[col].median()
-                self.df[col] = self.df[col].fillna(fill_val)
-                
-                # Rounding for cleanliness (1.0 -> 1)
-                if any(x in col.lower() for x in ['age', 'clicks', 'price']):
-                    self.df[col] = self.df[col].round(2)
+                if self.df[col].dtype == object:
+                    # Categorical protection: uses Mode if Agent mis-calls Median
+                    fill_val = self.df[col].mode()[0]
+                    self.df[col] = self.df[col].fillna(fill_val)
+                else:
+                    # Numeric logic
+                    fill_val = self.df[col].median()
+                    self.df[col] = self.df[col].fillna(round(fill_val, 2))
+                    
+                    # Specific type-casting to match Ground Truth
+                    if 'age' in col.lower():
+                        self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(0).astype('Int64')
+                    elif any(x in col.lower() for x in ['price', 'clicks']):
+                        self.df[col] = self.df[col].apply(lambda x: round(float(x), 2) if pd.notnull(x) else x)
+
                 message = f"Median Impute on {col}."
 
             elif tool == "knn_impute":
                 from sklearn.impute import KNNImputer
-                imputer = KNNImputer(n_neighbors=params.get("n_neighbors", 5))
-                
-                # Temporary numeric conversion for the math
-                series_numeric = pd.to_numeric(self.df[col], errors='coerce')
-                imputed = imputer.fit_transform(series_numeric.values.reshape(-1, 1))
+                temp_series = pd.to_numeric(self.df[col], errors='coerce').values.reshape(-1, 1)
+                imputed = KNNImputer(n_neighbors=params.get("n_neighbors", 5)).fit_transform(temp_series)
                 self.df[col] = imputed.flatten()
                 
-                # ID Integrity: If an ID was accidentally imputed, strip the .0 artifact
-                if any(idx in col.lower() for idx in ['id', 'idx', 'key']):
+                # Correct type-casting for KNN results
+                if 'age' in col.lower():
+                    self.df[col] = pd.to_numeric(self.df[col], errors='coerce').round(0).astype('Int64')
+                elif any(x in col.lower() for x in ['price', 'clicks']):
+                    self.df[col] = self.df[col].apply(lambda x: round(float(x), 2) if pd.notnull(x) else x)
+                
+                if any(x in col.lower() for x in ['id', 'idx', 'key']):
                     self.df[col] = self.df[col].apply(lambda x: str(int(float(x))) if pd.notnull(x) else x)
+                
                 message = f"KNN Impute on {col}."
 
-            elif tool == "mode_impute":
-                # Taking first mode for categorical consistency
-                modes = self.df[col].mode()
-                fill_val = modes[0] if not modes.empty else np.nan
-                self.df[col] = self.df[col].fillna(fill_val)
-                message = f"Mode Impute on {col}."
-            
-            else:
-                raise ValueError(f"Unknown tool: {tool}")
-
-            # 5. Refresh Weights & Logic
+            # 5. Post-execution updates
             self._update_weights()
             
-            # Calculate Reward (Uses logic.py functions)
+            # Calculate Reward Components
             bonus = float(calculate_rarity_bonus(self.history, tool))
-            gain = calculate_cleaning_gain(
-                old_df=old_df, 
-                new_df=self.df, 
-                column=col, 
-                tool=tool, 
-                weights=self.weights,
-                target_df=self.target_df # Add this!
-            )
+            gain = calculate_cleaning_gain(old_df, self.df, col, tool, self.weights, self.target_df)
             total_reward = float(gain + bonus)
 
-        except Exception as e:
-            return self._get_observation(f"Step Error: {str(e)}"), -1.0, False, {}
+            # 6. Final Status Checks with explicit casting to Python types
+            is_clean = bool(self.df.isnull().sum().sum() == 0)
+            is_limit_reached = bool(self.current_step >= self.step_limit)
+            done = is_clean or is_limit_reached
 
-        # 6. Check Completion Status
-        # Ensure we use the full dataframe for cleanliness check
-        is_clean = bool(self.df.isnull().sum().sum() == 0)
-        done = is_clean or (self.current_step >= self.step_limit)
-        
-        return self._get_observation(message), total_reward, done, {}
+            return self._get_observation(message), total_reward, done, {}
+
+        except Exception as e:
+            # Safe exit for the API if logic fails
+            return self._get_observation(f"Error: {str(e)}"), -1.0, False, {}  
+
 
     def _get_observation(self, message: str) -> Observation:
         """Constructs the view seen by the Agent, hiding IDs from the cleaning report."""
@@ -170,12 +169,8 @@ class AutoCleanEnv:
         
         # 3. Construct the clean report but force IDs to 0.0 missingness
         # This tricks the Agent into thinking they are already perfect.
-        clean_report = {}
-        for k, v in weighted_report.items():
-            if k in ignore_cols:
-                clean_report[str(k)] = 0.0
-            else:
-                clean_report[str(k)] = float(v)
+        clean_report = {str(k): (0.0 if any(i in str(k).lower() for i in ['id', 'idx', 'key']) else float(v)) 
+                        for k, v in weighted_report.items()}
 
         return Observation(
             # We keep the preview as-is so the Agent can see row associations
@@ -191,7 +186,7 @@ class AutoCleanEnv:
         print(f"\n--- [GRADER REPORT: {self.task_id.upper()}] ---")
         
         # 1. Identify columns to ignore
-        ignore_cols = ['User_ID', 'Product_ID', 'Customer_ID', 'idx', 'key']
+        ignore_cols = ['User_ID', 'Product_ID', 'Customer_ID', 'idx', 'key', 'id']
         
         # 2. Hard Task Logic (Governance First)
         if self.task_id == "hard":
@@ -203,8 +198,9 @@ class AutoCleanEnv:
         
         # 3. Easy/Medium Task Logic (Data Accuracy)
         # Filter the current and target dataframes to exclude IDs
-        current_data = self.df.drop(columns=[c for c in ignore_cols if c in self.df.columns])
-        target_data = self.target_df.drop(columns=[c for c in ignore_cols if c in self.target_df.columns])
+        cols_to_drop = [c for c in self.df.columns if any(k in c.lower() for k in ignore_cols)]
+        current_data = self.df.drop(columns=cols_to_drop)
+        target_data = self.target_df.drop(columns=cols_to_drop)
         
         # Reset indices to ensure alignment
         current = current_data.reset_index(drop=True)

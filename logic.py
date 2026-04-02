@@ -15,6 +15,9 @@ def get_weighted_missing_report(df: pd.DataFrame, weights: np.ndarray) -> Dict[s
 
 def calculate_cleaning_gain(old_df: pd.DataFrame, new_df: pd.DataFrame, column: str, tool: str, weights: np.ndarray, target_df: pd.DataFrame = None) -> float:
     """Calculates reward based on progress, threshold, and ID governance."""
+    # SAfety check for halucinated columns 
+    if column not in old_df.columns:
+        return -0.5
     is_null_before = old_df[column].isnull()
     total_weight = weights.sum()
     weighted_missing_pct = weights[is_null_before].sum() / total_weight if total_weight > 0 else 0.0
@@ -25,11 +28,9 @@ def calculate_cleaning_gain(old_df: pd.DataFrame, new_df: pd.DataFrame, column: 
 
     # 1. GOVERNANCE (Lowered to 40% to catch the Hard Task Survey_Response)
     # This ensures the Agent flags the column instead of trying to impute 40% missing data.
-    if weighted_missing_pct >= 0.40:
-        if tool == "flag_human":
-            return 2.0  # Increased reward for correct governance
-        else:
-            return -2.0 # Heavy penalty for attempting to impute high-missingness data
+    # In logic.py
+    if weighted_missing_pct >= 0.35: # Changed from 0.40 to 0.35
+        return 2.0 if tool == "flag_human" else -5.0
     
     # 2. ID HANDLING
     if is_id_col:
