@@ -16,10 +16,14 @@ from dotenv import load_dotenv
 
 load_dotenv() 
 
-API_BASE_URL = os.getenv("API_BASE_URL")
-MODEL_NAME = os.getenv("MODEL_NAME")
+DEFAULT_URL = "https://api-inference.huggingface.co/v1/" 
+DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+
+API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_URL)
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL)
 HF_TOKEN = os.getenv("HF_TOKEN")
 OPENENV_URL = os.getenv("OPENENV_URL", "http://localhost:7860")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "autoclean-pro:final")
 #IMAGE_NAME = os.getenv("IMAGE_NAME")
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
