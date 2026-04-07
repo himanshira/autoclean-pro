@@ -1,3 +1,14 @@
+---
+title: AutoClean-Pro
+emoji: 🧹
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "3.10"
+python_version: "3.10"
+app_file: server/app.py
+pinned: false
+---
 # AutoClean-Pro: Hardware-Aware Data Governance
 
 ## Motivation
