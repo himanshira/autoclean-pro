@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import uvicorn
 import subprocess
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -22,16 +23,13 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Environment registry
-# Populated lazily on first /reset call so the server starts even if data
-# files are not yet present at import time.
+# Environment registry — populated lazily on first /reset call
 # ---------------------------------------------------------------------------
 VALID_TASKS = {"easy", "medium", "hard"}
 envs: dict = {}
 
 
 def _get_env(task_id: str) -> AutoCleanEnv:
-    """Return the environment for task_id, raising 404 if not initialised."""
     if task_id not in envs:
         raise HTTPException(
             status_code=404,
@@ -40,15 +38,26 @@ def _get_env(task_id: str) -> AutoCleanEnv:
     return envs[task_id]
 
 
-def _obs_to_dict(obs) -> dict:
-    """Safely convert an Observation (Pydantic model or plain dict) to a dict."""
-    if isinstance(obs, dict):
-        return obs
-    if hasattr(obs, "model_dump"):   # Pydantic v2
-        return obs.model_dump()
-    if hasattr(obs, "dict"):         # Pydantic v1 fallback
-        return obs.dict()
-    return {}
+def _sanitise(obj):
+    """
+    Recursively replace NaN / Inf floats with JSON-safe values.
+    Python's json module raises ValueError on NaN/Inf — this prevents
+    the 500 'Out of range float values are not JSON compliant' error.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitise(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitise(v) for v in obj]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return 0.0
+        return obj
+    # Pydantic model → dict first, then sanitise
+    if hasattr(obj, "model_dump"):
+        return _sanitise(obj.model_dump())
+    if hasattr(obj, "dict"):
+        return _sanitise(obj.dict())
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -78,53 +87,43 @@ async def reset(task_id: str = "easy"):
     if task_id not in VALID_TASKS:
         raise HTTPException(status_code=404, detail=f"Unknown task '{task_id}'.")
 
-    # Always create a fresh environment on reset
     envs[task_id] = AutoCleanEnv(task_id=task_id)
     obs = envs[task_id].reset()
 
-    # reset() returns an Observation Pydantic model — convert to dict for JSON response
-    return {"observation": _obs_to_dict(obs), "info": {}}
+    # _sanitise converts the Observation model to dict AND replaces NaN/Inf
+    return {"observation": _sanitise(obs), "info": {}}
 
 
 @app.post("/step")
 async def step(action: Action, task_id: str = "easy"):
     env    = _get_env(task_id)
     result = env.step(action)
-
-    # result is already a plain dict from _json_safe, but observation inside
-    # may still be an Observation model if called directly — normalise it.
-    if "observation" in result and not isinstance(result["observation"], dict):
-        result["observation"] = _obs_to_dict(result["observation"])
-
-    return result
+    # result comes through env._json_safe already, but _sanitise catches
+    # any remaining NaN/Inf that slipped through (e.g. in data_preview)
+    return _sanitise(result)
 
 
 @app.get("/grader")
 async def get_grader(task_id: str = "easy"):
     env   = _get_env(task_id)
-    score = env.grader()
-    return {
-        "task_id":    task_id,
-        "score":      score,
-        "success":    (score >= 1.0) if task_id == "hard" else (score > 0.98),
-    }
+    score = env.grader(silent=True)
+    return _sanitise({
+        "task_id": task_id,
+        "score":   score,
+        "success": (score >= 1.0) if task_id == "hard" else (score > 0.98),
+    })
 
 
 @app.post("/baseline")
 async def trigger_baseline(background_tasks: BackgroundTasks):
-    """
-    Run inference.py in the background.
-    subprocess stdout is captured and redirected to stderr so it never
-    pollutes the hackathon evaluator's stdout parser.
-    """
     def run_inference():
         try:
             proc = subprocess.run(
-                [sys.executable, "inference.py"],
+                ["uv", "run", "python", "inference.py"],
                 text=True,
-                capture_output=True,   # captures both stdout and stderr
+                capture_output=True,
+                cwd="/app",
             )
-            # Forward inference stdout → our stderr (keeps evaluator stdout clean)
             if proc.stdout:
                 sys.stderr.write("[INFERENCE STDOUT]\n" + proc.stdout)
                 sys.stderr.flush()
@@ -153,15 +152,14 @@ async def get_baseline():
 
 @app.get("/state")
 async def get_state(task_id: str = "easy"):
-    """Return a lightweight snapshot of the current environment state."""
     env = _get_env(task_id)
     return {
-        "task_id":      task_id,
-        "current_step": env.current_step,
-        "step_limit":   env.step_limit,
-        "history":      env.history,
+        "task_id":       task_id,
+        "current_step":  env.current_step,
+        "step_limit":    env.step_limit,
+        "history":       env.history,
         "missing_total": int(env.df.isnull().sum().sum()),
-        "total_rows":   len(env.df),
+        "total_rows":    len(env.df),
     }
 
 
