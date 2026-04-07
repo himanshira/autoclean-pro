@@ -1,9 +1,28 @@
+# Python virtual environments
 venv/
+.venv/
+
+# Environment variables — never commit HF_TOKEN or secrets
 .env
+
+# Python bytecode
 __pycache__/
 *.pyc
+*.pyo
+
+# Jupyter
 .ipynb_checkpoints/
+
+# Build / packaging artifacts
 *.egg-info/
+dist/
+build/
+*.dist-info/
+
+# macOS noise
+.DS_Store
+
+# Test and debug scripts — not part of submission
 debug_llm.py
 test_official.py
 baseline.py

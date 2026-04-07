@@ -8,26 +8,26 @@ version = "1.0.0"
 description = "A hardware-aware data cleaning environment with HITL governance."
 readme = "README.md"
 requires-python = ">=3.10"
-# Added the required openenv dependency here
 dependencies = [
     "fastapi",
     "uvicorn",
     "pandas>=2.0.0",
     "numpy>=1.24.0,<2.0.0",
     "scikit-learn",
-    "pydantic",
-    "requests",
+    "pydantic>=2.0.0",
     "openenv>=0.1.13",
     "openai>=2.30.0",
     "python-dotenv>=1.2.2",
 ]
 
-# This satisfies the "Missing [project.scripts] server entry point" error
+# Entry point for the FastAPI server
+# Allows: python -m server.app  OR  uv run server
 [project.scripts]
 server = "server.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
 [tool.setuptools]
 include-package-data = true
 

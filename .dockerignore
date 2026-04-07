@@ -1,19 +1,33 @@
 # .dockerignore
+
+# Version control
 .git
+
+# Secrets — never bake into image; use HF Space secrets instead
 .env
+
+# Virtual environments — uv rebuilds inside the container
 venv/
 .venv/
+
+# Python bytecode
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
-*.egg-info/
 
-# Extra scripts
+# Jupyter
+.ipynb_checkpoints/
+
+# Build artifacts — generated locally, not needed in image
+*.egg-info/
+dist/
+build/
+
+# Test and debug scripts — not part of the submission runtime
 debug_llm.py
 test_official.py
 baseline.py
 test_api.py
 validate-submission.sh
 
-# Data (Optional)
+# Data generation script — data/ CSVs are committed and copied by COPY . .
 generate_data.py

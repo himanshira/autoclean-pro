@@ -11,18 +11,22 @@ ToolType = Literal[
     "cast_type", 
     "finish"
 ]
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
 
 class Action(BaseModel):
-    # Using Field with default_factory for params makes it more robust
-    tool: ToolType = Field(..., description="The cleaning tool to use")
-    column: str = Field(..., description="The target column name")
-    params: Dict[str, Any] = Field(default_factory=dict)
+    tool: str
+    column: Optional[str] = None
+    params: Optional[Dict[str, Any]] = {}
 
-    # Allow the model to accept data even if the LLM adds extra fields
-    model_config = ConfigDict(
-        populate_by_name=True,
-        extra='ignore' 
-    )
+    # This magic helper allows the model to accept "cleaning_tool" 
+    # and map it to "tool" automatically if the LLM hallucinates.
+    def __init__(self, **data):
+        if "cleaning_tool" in data and "tool" not in data:
+            data["tool"] = data.pop("cleaning_tool")
+        if "column_to_clean" in data and "column" not in data:
+            data["column"] = data.pop("column_to_clean")
+        super().__init__(**data)
 
 class Observation(BaseModel):
     data_preview: List[Dict[str, Any]]
