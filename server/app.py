@@ -106,11 +106,13 @@ async def step(action: Action, task_id: str = "easy"):
 @app.get("/grader")
 async def get_grader(task_id: str = "easy"):
     env   = _get_env(task_id)
-    score = env.grader(silent=True)
+    raw   = env.grader(silent=True)
+    # Phase 2 requires score strictly in (0, 1) — clamp both ends
+    score = max(0.001, min(0.999, float(raw)))
     return _sanitise({
         "task_id": task_id,
         "score":   score,
-        "success": (score >= 1.0) if task_id == "hard" else (score > 0.98),
+        "success": (score > 0.99) if task_id == "hard" else (score > 0.98),
     })
 
 
