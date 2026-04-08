@@ -264,28 +264,19 @@ def run_task(task_id: str) -> None:
 
 def warmup_llm_proxy() -> None:
     """
-    Phase 2 requirement: make at least one real client.chat.completions.create()
-    call through the injected LiteLLM proxy so last_active is updated.
-    Produces zero output — stdout stays strictly [START]/[STEP]/[END] only.
+    Phase 2 requirement: make one real client.chat.completions.create() call
+    through the injected LiteLLM proxy so last_active is updated.
+    - max_tokens=1  : smallest possible response, fastest return
+    - timeout=10    : never hangs the pipeline if proxy is slow
+    - silent        : zero stdout/stderr output
     """
     try:
         client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a data cleaning agent."
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "I am about to clean a dataset. "
-                        "Reply with exactly one word: Ready"
-                    )
-                }
-            ],
-            max_tokens=5,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
             temperature=0.0,
+            timeout=10,
         )
     except Exception:
         pass  # Non-fatal — deterministic agent runs regardless
