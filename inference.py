@@ -99,7 +99,9 @@ def evaluate_success(env: AutoCleanEnv) -> tuple:
     try:
         score = env.grader(silent=True)
         if env.task_id == "hard":
-            return bool(score >= 1.0), float(score)
+            # hard grader returns 0.999 on success (clamped from 1.0)
+            return bool(score > 0.99), float(score)
+        # easy/medium grader returns 0.999 on full clean (clamped from 1.0)
         return bool(score > 0.98), float(score)
     except Exception as e:
         _warn(f"evaluate_success failed: {e}")

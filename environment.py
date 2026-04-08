@@ -166,13 +166,18 @@ class AutoCleanEnv:
 
         Uses rtol=0.02 in np.isclose so that imputed values within 2% of the
         target (e.g. median=22.75 vs target=22.5) are counted as correct.
-        This reflects real-world imputation tolerance and ensures medium task
-        reaches >0.98 with standard median/mode imputation.
+
+        Scores are clamped to (0.001, 0.999) — strictly between 0 and 1 —
+        as required by the Phase 2 validator which rejects 0.0 and 1.0.
         """
         ignore_keys = ["user_id", "product_id", "customer_id", "idx", "key", "id"]
 
+        # Clamp helper: strictly open interval (0, 1)
+        def _clamp(s: float) -> float:
+            return max(0.001, min(0.999, float(s)))
+
         if self.task_id == "hard":
-            return 1.0 if "flag_human" in self.history else 0.0
+            return _clamp(0.999 if "flag_human" in self.history else 0.001)
 
         try:
             drop_cols = [c for c in self.df.columns
@@ -186,16 +191,17 @@ class AutoCleanEnv:
             total_elements = int(target.size)
             score          = float(matches / total_elements) if total_elements > 0 else 0.0
 
+            clamped = _clamp(score)
             if not silent:
-                sys.stderr.write(f"[GRADER:{self.task_id.upper()}] {score:.4f} ({score:.2%})\n")
+                sys.stderr.write(f"[GRADER:{self.task_id.upper()}] {clamped:.4f} ({clamped:.2%})\n")
                 sys.stderr.flush()
-            return score
+            return clamped
 
         except Exception as e:
             if not silent:
                 sys.stderr.write(f"[GRADER ERROR] {e}\n")
                 sys.stderr.flush()
-            return 0.0
+            return 0.001
 
     def close(self) -> None:
         """Release resources. Safe to call multiple times."""
