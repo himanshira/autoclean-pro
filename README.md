@@ -5,10 +5,10 @@ colorFrom: blue
 colorTo: green
 sdk: docker
 pinned: false
-short_description: RL environment for autonomous data cleaning with HITL governance
+short_description: Autonomous data cleaning RL env with HITL governance
 ---
 
-# AutoClean-Pro: Hardware-Aware Data Governance
+# AutoClean-Pro: Adaptive Data Governance for RL Agents
 
 **[Try the live API](https://himanshirawat0892-autoclean-pro.hf.space/docs)**
 
@@ -30,52 +30,58 @@ The key innovation is **Adaptive Bayesian Weighting**: missingness scores are am
 
 ```
 Observation after reset:
-  missing_report: {"Age": 0.28, "Clicks": 0.14}
+  missing_report: {"Age": 0.34, "Clicks": 0.14}
   weighting_mode: "bayesian_scarce"
   dataset_regime: "scarce_10rows"
 
-Step 1: median_impute(Age)   → reward: +2.00  (score improves)
-Step 2: median_impute(Clicks) → reward: +0.50  done=true
-Grader: score=0.999  success=true
+Step 1: knn_impute(Age)       → reward: +1.50  (score=0.34, numeric, 0.15-0.34 band)
+Step 2: median_impute(Clicks) → reward: +2.60  done=true
+[END] success=true steps=2 score=1.00 rewards=1.50,2.60
 ```
 
-### Example: Hard Task (Governance)
+### Example: Hard Task (Governance + Partial Imputation)
 
 ```
 Observation after reset:
-  missing_report: {"Survey_Response": 0.42, "Income_k": 0.28}
+  missing_report: {"Survey_Response": 0.40, "Income_k": 0.28}
   weighting_mode: "bayesian_scarce"
 
-Survey_Response has 40% missing → agent MUST flag_human (not impute)
-Any imputation attempt → penalty: -5.0 reward
+Survey_Response: 40% missing → score ≥ 0.35 → flag_human required
+Any imputation on ≥0.35 column → penalty: -5.0 reward
 
 Step 1: flag_human(Survey_Response) → reward: +2.00
-Step 2: finish                       → done=true
-Grader: score=0.999  success=true
+        Survey_Response score → 0.0 in next observation (column handled)
+Step 2: knn_impute(Income_k)        → reward: +1.60
+Step 3: finish                      → done=true
+[END] success=true steps=3 score=1.00 rewards=2.00,1.60,0.00
+Grader: 60% (governance flagged) + 40% (Income_k cleaned) = 1.0
 ```
 
 ---
 
 ## Adaptive Bayesian Weighting
 
-The core technical innovation. Standard environments report flat missingness (1 missing / 10 rows = 10%). AutoClean-Pro amplifies scores for scarce datasets:
+The core technical innovation. Standard environments report flat missingness. AutoClean-Pro amplifies scores for scarce datasets with a critical constraint: **amplification never pushes a sub-threshold column into governance territory**.
 
 ```
 amplification = 1 + (threshold - n) / (threshold × 2)
   n=10, threshold=50 → amp = 1.40
 
-weighted_pct = flat_pct × amplification
+# Sub-threshold columns (flat < 0.35): amplify but cap at 0.34
+weighted_pct = min(0.34, flat_pct × amp)
+
+# Governance columns (flat ≥ 0.35): return flat_pct directly
+weighted_pct = flat_pct
 ```
 
-**Tool selection preserved across dataset sizes:**
+**Tool-selection bands:**
 
 | Missing / 10 rows | Flat % | Weighted % | Tool |
 |---|---|---|---|
 | 1 / 10 | 0.10 | 0.14 | `median_impute` |
 | 2 / 10 | 0.20 | 0.28 | `knn_impute` |
-| 3 / 10 | 0.30 | 0.42 | `flag_human` |
-
-On a 1000-row dataset, 3 missing = 0.003 → `median_impute`. On a 10-row rare disease dataset, the same count escalates to human review. The amplification captures this real-world difference.
+| 3 / 10 | 0.30 | 0.34 (capped) | `knn_impute` |
+| 4 / 10 | 0.40 | 0.40 (governance) | `flag_human` |
 
 **Three configurable modes:**
 
@@ -93,65 +99,67 @@ The inference agent uses **CoT with guided self-consistency** rather than a sing
 
 1. Sample 3 LLM responses (temperature=0.0 for first, 0.3 for diversity)
 2. Each response produces `<think>...</think>` reasoning + JSON action
-3. Select the best action by: `urgency_score + 0.3 × consensus`
+3. Select best action by: `urgency_score + 0.3 × consensus`
    - `urgency` = `missing_report[column]` from the environment
    - `consensus` = fraction of samples agreeing on (tool, column)
 
-This prevents the most common failure mode — the LLM choosing a clean column when dirty ones remain — while using environmental signal (not majority vote alone) as the tie-breaker.
-
-The system prompt is **built dynamically** from the observation, explaining to the LLM which weighting mode is active and what the amplified scores mean, so it can reason correctly about a score of `0.14` in scarce mode vs standard mode.
+The system prompt uses an explicit **decision tree** with few-shot examples mapped to exact column names, eliminating ambiguity for borderline cases.
 
 ---
 
 ## Tool Registry
 
-Tools self-register via decorator — the environment never hardcodes tool names:
+Tools self-register via decorator — the environment never hardcodes column names:
 
 ```python
-@ToolRegistry.register("median_impute")
-def _median_impute(df, col, params):
-    s = pd.to_numeric(df[col], errors="coerce")
-    df.loc[:, col] = s.fillna(s.median())
-    return df, f"Median impute on '{col}'."
+@ToolRegistry.register("knn_impute")
+def _knn_impute(df, col, params):
+    k = int(params.get("n_neighbors", 5))
+    imputed = KNNImputer(n_neighbors=k).fit_transform(...)
+    return df, f"KNN impute (k={k}) on '{col}'."
 ```
 
-New tools can be added without modifying `AutoCleanEnv`. The agent discovers available tools from `GET /tools` at runtime.
+New tools require only a decorated function — no changes to `AutoCleanEnv`. The agent discovers available tools from `GET /tools` at runtime.
 
 ---
 
 ## Tasks
 
-3 tasks across difficulty levels. All use real CSV data.
+| Task | Dataset | Key challenge | Correct episode | Success threshold |
+|---|---|---|---|---|
+| `easy` | 10 rows, Age (float) + Clicks (binary 0/1) | knn + median impute | `knn_impute(Age)` → `median_impute(Clicks)` | score > 0.98 |
+| `medium` | 10 rows, Price (object) + Category (str) | Schema repair + imputation | `cast_type(Price)` → `knn_impute(Price)` → `mode_impute(Category)` | score > 0.98 |
+| `hard` | 10 rows, 40% Survey_Response + 20% Income_k | Governance + partial clean | `flag_human(Survey_Response)` → `knn_impute(Income_k)` | score > 0.99 |
 
-| Task | Dataset | Key challenge | Success threshold |
-|---|---|---|---|
-| `easy` | 10 rows, 2 numeric cols, 4 NaNs | Median impute both columns | score > 0.98 |
-| `medium` | 10 rows, mixed types, 4 NaNs | Cast + median + mode impute | score > 0.98 |
-| `hard` | 10 rows, 40% Survey_Response missing | Governance: must flag_human | score > 0.99 |
+### Upload your own CSV
+
+`POST /upload` accepts any messy CSV and runs the full Bayesian cleaning pipeline against it. Column names, dtypes, and missingness are discovered at runtime. Grader scores by NaN elimination — fraction of dirty cells filled — with no ground-truth file needed.
 
 ---
 
 ## Reward Shaping
 
 ```
-Reward = ΔQuality + RarityBonus − RepetitionPenalty
+Reward = ΔQuality + StrategyBonus + AccuracyBonus + RarityBonus − Penalties
 ```
 
 | Component | Value |
 |---|---|
-| Cleaning gain (ΔQuality) | Proportional to NaNs removed, strategy-aligned bonus |
-| flag_human on ≥35% column | +2.0 |
-| Imputing a ≥35% column | −5.0 |
+| Cleaning gain (NaNs removed / total NaNs in column) | 0.0 – 1.0 |
+| Strategy alignment (right tool for the score band) | +0.3 – +0.75 |
 | Exact match with ground truth | +1.0 |
+| `flag_human` on ≥35% column | +2.0 |
+| Imputing a ≥35% column | −5.0 |
 | Diverse tool usage | +0.1 |
 | Back-to-back same tool | −2.0 |
 
-Scores are clamped to (0.001, 0.999) — strictly open interval as required.
+Scores clamped to `(0.001, 0.999)` — strictly open interval as required by the validator.
 
 ---
 
 ## Architecture
-![alt text](autoclean_system_architecture.svg)
+
+![Architecture diagram](autoclean_system_architecture.svg)
 
 ### BaseEnv Pattern
 
@@ -168,19 +176,20 @@ class BaseCleanEnv(ABC):
     def state(self) -> EpisodeState: ...
 ```
 
-`AutoCleanEnv` inherits `BaseCleanEnv`. Column names are discovered dynamically from the loaded CSV — nothing is hardcoded.
+`AutoCleanEnv` inherits `BaseCleanEnv`. Column names are discovered from the loaded CSV at `reset()` — nothing hardcoded anywhere.
 
 ### EpisodeState
 
-OpenEnv-compatible state contract with `episode_id` + `step_count`, plus Bayesian context:
+OpenEnv-compatible state with `episode_id` + `step_count`, plus Bayesian context:
 
 ```json
 {
   "episode_id": "uuid",
-  "step_count": 2,
+  "step_count": 3,
   "weighting_mode": "bayesian_scarce",
   "dataset_regime": "scarce_10rows",
-  "history": ["median_impute", "median_impute"]
+  "history": ["flag_human", "knn_impute", "finish"],
+  "flagged_cols": ["Survey_Response"]
 }
 ```
 
@@ -194,9 +203,10 @@ OpenEnv-compatible state contract with `episode_id` + `step_count`, plus Bayesia
 | `/reset` | POST | Start episode. Params: `task_id`, `bayesian_mode`, `scarce_threshold` |
 | `/step` | POST | Execute action: `{"tool": "...", "column": "...", "params": {}}` |
 | `/grader` | GET | Deterministic score + weighting context |
-| `/state` | GET | Full EpisodeState — OpenEnv compatible |
-| `/tools` | GET | Live tool registry — agent can discover tools at runtime |
-| `/baseline` | POST | Run `inference.py` in background; output in Logs tab |
+| `/state` | GET | Full `EpisodeState` — OpenEnv compatible |
+| `/tools` | GET | Live tool registry — agent discovers tools at runtime |
+| `/upload` | POST | Upload any CSV — Bayesian cleaning without ground truth |
+| `/baseline` | POST | Run `inference.py` in background; output in HF Space Logs tab |
 | `/docs` | GET | Interactive Swagger UI |
 
 ---
@@ -218,15 +228,21 @@ uv run python inference.py
 
 ```
 [START] task=easy env=autoclean_benchmark model=Qwen/Qwen2.5-7B-Instruct
-[STEP] step=1 action={"tool":"median_impute","column":"Age","params":{}} reward=2.00 done=false error=null
-[STEP] step=2 action={"tool":"median_impute","column":"Clicks","params":{}} reward=0.50 done=true error=null
-[END] success=true steps=2 rewards=2.00,0.50 score=0.9990
+[STEP] step=1 action={"tool":"knn_impute","column":"Age","params":{}} reward=1.50 done=false error=null
+[STEP] step=2 action={"tool":"median_impute","column":"Clicks","params":{}} reward=2.60 done=true error=null
+[END] success=true steps=2 score=1.00 rewards=1.50,2.60
 
-[START] task=medium ...
-[END] success=true steps=3 rewards=... score=0.9990
+[START] task=medium env=autoclean_benchmark model=Qwen/Qwen2.5-7B-Instruct
+[STEP] step=1 action={"tool":"cast_type","column":"Price","params":{"target_dtype":"float64"}} reward=0.10 done=false error=null
+[STEP] step=2 action={"tool":"knn_impute","column":"Price","params":{}} reward=2.60 done=false error=null
+[STEP] step=3 action={"tool":"mode_impute","column":"Category","params":{}} reward=2.85 done=true error=null
+[END] success=true steps=3 score=1.00 rewards=0.10,2.60,2.85
 
-[START] task=hard ...
-[END] success=true steps=2 rewards=2.00,0.00 score=0.9990
+[START] task=hard env=autoclean_benchmark model=Qwen/Qwen2.5-7B-Instruct
+[STEP] step=1 action={"tool":"flag_human","column":"Survey_Response","params":{}} reward=2.00 done=false error=null
+[STEP] step=2 action={"tool":"knn_impute","column":"Income_k","params":{}} reward=1.60 done=false error=null
+[STEP] step=3 action={"tool":"finish","column":null,"params":{}} reward=0.00 done=true error=null
+[END] success=true steps=3 score=1.00 rewards=2.00,1.60,0.00
 ```
 
 ---
@@ -234,13 +250,15 @@ uv run python inference.py
 ## Project Structure
 
 ```
-├── data/               # Dirty and clean CSV pairs (6 files)
+├── data/                  # Dirty and clean CSV pairs (6 files)
 ├── server/
-│   └── app.py          # FastAPI + Gradio UI (port 7860)
-├── environment.py      # BaseCleanEnv + AutoCleanEnv + ToolRegistry
-├── logic.py            # Adaptive Bayesian weighting + reward functions
-├── models.py           # Pydantic V2 schemas (Action, Observation, State)
-├── inference.py        # CoT + guided self-consistency agent
-├── pyproject.toml      # Dependencies (uv)
-└── openenv.yaml        # OpenEnv spec
+│   └── app.py             # FastAPI server (port 7860)
+├── environment.py         # BaseCleanEnv + AutoCleanEnv + ToolRegistry
+├── logic.py               # Adaptive Bayesian weighting + reward functions
+├── models.py              # Pydantic V2 schemas (Action, Observation, State)
+├── inference.py           # CoT + guided self-consistency agent
+├── generate_data.py       # Synthetic dataset generator
+├── pyproject.toml         # Dependencies (uv)
+├── openenv.yaml           # OpenEnv spec
+└── .gitattributes         # Line ending normalization (LF)
 ```
