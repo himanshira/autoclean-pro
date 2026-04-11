@@ -172,7 +172,7 @@ Scores clamped to `(0.001, 0.999)` — strictly open interval as required by the
 
 ## Architecture
 
-![Architecture diagram](https://raw.githubusercontent.com/himanshira/autoclean-pro/main/autoclean_system_architecture.svg)
+![alt text](autoclean_system_architecture.svg)
 
 ### BaseEnv Pattern
 
@@ -342,12 +342,12 @@ The file contains your original data with all imputed values filled in.
 
 ---
 
-### Full example: Hitters baseball salary dataset
+### Full example: salary dataset with 18% missing values (322 rows)
 
 ```bash
 # 1. Upload
 curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/upload" \
-  -F "file=@Hitters.csv;type=text/csv"
+  -F "file=@salary_data.csv;type=text/csv"
 # → Salary: 59/322 missing (18.3%) → score=0.183 → knn_impute
 
 # 2. Impute Salary
