@@ -392,7 +392,7 @@ curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" 
 
 ## Testing
 
-50 unit tests covering reward hacking prevention, grader accuracy, Bayesian weighting correctness, and environment state management:
+53 unit tests covering reward hacking prevention, grader accuracy, Bayesian weighting correctness, and environment state management:
 
 ```bash
 uv run python -m pytest test_autoclean.py -v
@@ -401,9 +401,9 @@ uv run python -m pytest test_autoclean.py -v
 | Test class | Tests | What it guards |
 |---|---|---|
 | `TestRewardHacking` | 12 | Imputing governance columns, double-flagging, ID column farming, repetition gaming |
-| `TestGraderLogic` | 8 | Score accuracy, partial credit, strict (0,1) clamping |
-| `TestBayesianWeighting` | 8 | Amplification, governance cap at 0.34, sentinel string detection |
-| `TestEnvironmentState` | 7 | Episode ID rotation, flagged_cols zeroing, history tracking |
-| `TestToolRegistry` | 5 | All 7 tools registered, unknown tool raises, knn redirect on object |
+| `TestGraderLogic` | 8 | Score accuracy, partial credit (60%+40%), strict (0.001, 0.999) clamping |
+| `TestBayesianWeighting` | 8 | Amplification, governance cap at 0.34, sentinel string detection, mode switching |
+| `TestEnvironmentState` | 7 | Episode ID rotation, flagged_cols zeroing, history tracking, idempotent close |
+| `TestToolRegistry` | 8 | All 8 tools registered, unknown tool raises, knn redirect on object columns, median_impute safety guard (no data destruction on object columns), multifeature_knn contextual fills |
 | `TestObservationContract` | 5 | Required fields, weighting_mode correctness, score range |
 | `TestEpisodeBoundaries` | 5 | step_limit, done flag, reward type contract |
