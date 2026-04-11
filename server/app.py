@@ -233,19 +233,20 @@ async def run_agent(task_id: str = "easy"):
 
     env = _get_env(task_id)        # raises 404 if not initialised
 
-    obs        = _sanitise(env.reset())
+    raw_obs    = env.reset()
     rewards    = []
     steps      = 0
     flag_done  = False
     log_lines  = []
 
-    obs_dict = obs if isinstance(obs, dict) else (
-        obs.model_dump() if hasattr(obs, "model_dump") else dict(obs)
-    )
+    # obs must be a plain dict — get_agent_action signature: (obs, env, flag_done)
+    obs_dict = (raw_obs.model_dump() if hasattr(raw_obs, "model_dump")
+                else raw_obs if isinstance(raw_obs, dict)
+                else dict(raw_obs))
 
     for step_idx in range(1, env.step_limit + 1):
         steps = step_idx
-        action_dict = inf_module.get_agent_action(env, obs_dict, flag_done)
+        action_dict = inf_module.get_agent_action(obs_dict, env, flag_done)
 
         if action_dict.get("tool") == "flag_human":
             flag_done = True
@@ -253,9 +254,10 @@ async def run_agent(task_id: str = "easy"):
         result   = _sanitise(env.step(Action(**action_dict)))
         reward   = float(result.get("reward", 0.0))
         done     = bool(result.get("done", False))
-        obs_dict = result.get("observation", {})
-        if hasattr(obs_dict, "model_dump"):
-            obs_dict = obs_dict.model_dump()
+        raw_step_obs = result.get("observation", {})
+        obs_dict = (raw_step_obs.model_dump() if hasattr(raw_step_obs, "model_dump")
+                    else raw_step_obs if isinstance(raw_step_obs, dict)
+                    else {})
         err      = result.get("info", {}).get("last_action_error")
 
         line = (f"[STEP] step={step_idx} "
