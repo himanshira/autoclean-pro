@@ -3,14 +3,15 @@ import sys
 import math
 import uvicorn
 import subprocess
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+import io
+import tempfile
 from fastapi.middleware.cors import CORSMiddleware
 
-# Ensure the root directory is on the path (handles running from a subdirectory)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import Action, Observation
-from environment import AutoCleanEnv
+from models import Action, Observation, State
+from environment import AutoCleanEnv, ToolRegistry
 
 app = FastAPI(title="AutoClean-Pro API")
 
@@ -23,9 +24,9 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Environment registry — populated lazily on first /reset call
+# Environment registry — lazily populated on /reset
 # ---------------------------------------------------------------------------
-VALID_TASKS = {"easy", "medium", "hard"}
+VALID_TASKS = {"easy", "medium", "hard", "custom"}
 envs: dict = {}
 
 
@@ -39,20 +40,13 @@ def _get_env(task_id: str) -> AutoCleanEnv:
 
 
 def _sanitise(obj):
-    """
-    Recursively replace NaN / Inf floats with JSON-safe values.
-    Python's json module raises ValueError on NaN/Inf — this prevents
-    the 500 'Out of range float values are not JSON compliant' error.
-    """
+    """Recursively replace NaN/Inf — prevents HTTP 500 on JSON serialisation."""
     if isinstance(obj, dict):
         return {k: _sanitise(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_sanitise(v) for v in obj]
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return 0.0
-        return obj
-    # Pydantic model → dict first, then sanitise
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return 0.0
     if hasattr(obj, "model_dump"):
         return _sanitise(obj.model_dump())
     if hasattr(obj, "dict"):
@@ -61,36 +55,29 @@ def _sanitise(obj):
 
 
 # ---------------------------------------------------------------------------
-# Cached baseline scores
-# ---------------------------------------------------------------------------
-BASELINE_RESULTS = {
-    "easy":   2.50,
-    "medium": 2.85,
-    "hard":   4.10,
-    "model":  "Qwen/Qwen2.5-7B-Instruct",
-    "status": "Verified",
-    "date":   "2026-04-07",
-}
-
-
-# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root():
+    """Health check — must return 200 for validator ping."""
     return {"message": "AutoClean-Pro OpenEnv is Live."}
 
 
 @app.post("/reset")
-async def reset(task_id: str = "easy"):
+async def reset(
+    task_id:          str = "easy",
+    bayesian_mode:    str = "auto",
+    scarce_threshold: int = 50,
+):
     if task_id not in VALID_TASKS:
         raise HTTPException(status_code=404, detail=f"Unknown task '{task_id}'.")
-
-    envs[task_id] = AutoCleanEnv(task_id=task_id)
+    envs[task_id] = AutoCleanEnv(
+        task_id=task_id,
+        bayesian_mode=bayesian_mode,
+        scarce_threshold=scarce_threshold,
+    )
     obs = envs[task_id].reset()
-
-    # _sanitise converts the Observation model to dict AND replaces NaN/Inf
     return {"observation": _sanitise(obs), "info": {}}
 
 
@@ -98,8 +85,6 @@ async def reset(task_id: str = "easy"):
 async def step(action: Action, task_id: str = "easy"):
     env    = _get_env(task_id)
     result = env.step(action)
-    # result comes through env._json_safe already, but _sanitise catches
-    # any remaining NaN/Inf that slipped through (e.g. in data_preview)
     return _sanitise(result)
 
 
@@ -107,17 +92,106 @@ async def step(action: Action, task_id: str = "easy"):
 async def get_grader(task_id: str = "easy"):
     env   = _get_env(task_id)
     raw   = env.grader(silent=True)
-    # Phase 2 requires score strictly in (0, 1) — clamp both ends
     score = max(0.001, min(0.999, float(raw)))
     return _sanitise({
-        "task_id": task_id,
-        "score":   score,
-        "success": (score > 0.99) if task_id == "hard" else (score > 0.98),
+        "task_id":        task_id,
+        "score":          score,
+        "success":        (score > 0.99) if task_id == "hard" else (score > 0.98),
+        "weighting_mode": env.state.weighting_mode,
+        "dataset_regime": env.state.dataset_regime,
     })
+
+
+@app.get("/state")
+async def get_state(task_id: str = "easy"):
+    """OpenEnv-compatible state endpoint — returns models.State Pydantic model."""
+    env   = _get_env(task_id)
+    state = env.get_state_model()
+    return _sanitise({
+        **state.model_dump(),
+        "missing_total":  int(env.df.isnull().sum().sum()) if env.df is not None else 0,
+        "total_rows":     len(env.df) if env.df is not None else 0,
+        "available_tools": ToolRegistry.available(),
+    })
+
+
+@app.post("/upload")
+async def upload_and_reset(
+    file:             UploadFile = File(...),
+    bayesian_mode:    str = "auto",
+    scarce_threshold: int = 50,
+):
+    """
+    Upload any messy CSV and run the cleaning agent against it.
+    This makes AutoClean-Pro genuinely general-purpose — not just the
+    3 bundled tasks. The agent will discover column names, dtypes, and
+    missingness from the uploaded file at runtime.
+
+    The uploaded CSV is treated as task_id="custom". The grader scores
+    by checking whether all NaN values have been filled (no ground-truth
+    required). flag_human is triggered if any column has >=35% missing.
+    """
+    contents = await file.read()
+    try:
+        import pandas as pd
+        df_dirty = pd.read_csv(
+            io.StringIO(contents.decode("utf-8")),
+            na_values=["", " ", "nan", "NaN", "None", "null", "nan.0", "Nan"],
+            keep_default_na=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
+
+    # Save to a temp file so AutoCleanEnv can read it
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, dir="/tmp"
+    ) as tmp:
+        df_dirty.to_csv(tmp.name, index=False)
+        tmp_path = tmp.name
+
+    # Patch paths and reset with a custom task
+    env = AutoCleanEnv.__new__(AutoCleanEnv)
+    env.task_id          = "custom"
+    env.step_limit       = 15
+    env._bayesian_mode   = bayesian_mode
+    env._scarce_threshold = scarce_threshold
+    env._paths           = {"custom": {"dirty": tmp_path, "clean": tmp_path}}
+    env.df               = None
+    env.target_df        = None
+    env.weights          = None
+    from environment import EpisodeState
+    import uuid
+    env._state = EpisodeState(task_id="custom")
+
+    obs = env.reset()
+    envs["custom"] = env
+
+    return {
+        "observation": _sanitise(obs),
+        "info": {
+            "task_id":         "custom",
+            "rows":            len(env.df) if env.df is not None else 0,
+            "columns":         list(env.df.columns) if env.df is not None else [],
+            "missing_total":   int(env.df.isnull().sum().sum()) if env.df is not None else 0,
+            "weighting_mode":  env.state.weighting_mode,
+            "dataset_regime":  env.state.dataset_regime,
+            "note": (
+                "Use POST /step?task_id=custom to clean this dataset. "
+                "GET /grader?task_id=custom for score."
+            ),
+        },
+    }
+
+
+@app.get("/tools")
+async def list_tools():
+    """Live tool registry — agents discover available tools at runtime."""
+    return {"tools": ToolRegistry.available()}
 
 
 @app.post("/baseline")
 async def trigger_baseline(background_tasks: BackgroundTasks):
+    """Run inference.py in background. Output appears in HF Space Logs tab."""
     def run_inference():
         try:
             proc = subprocess.run(
@@ -141,27 +215,18 @@ async def trigger_baseline(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(run_inference)
     return {
-        "status":          "Inference started in background.",
-        "instruction":     "Monitor the Logs tab for [START] / [STEP] / [END] output.",
-        "cached_baseline": BASELINE_RESULTS,
+        "status":      "Inference started in background.",
+        "instruction": "Monitor the HF Space Logs tab for [START]/[STEP]/[END] output.",
     }
 
 
 @app.get("/baseline")
 async def get_baseline():
-    return BASELINE_RESULTS
-
-
-@app.get("/state")
-async def get_state(task_id: str = "easy"):
-    env = _get_env(task_id)
     return {
-        "task_id":       task_id,
-        "current_step":  env.current_step,
-        "step_limit":    env.step_limit,
-        "history":       env.history,
-        "missing_total": int(env.df.isnull().sum().sum()),
-        "total_rows":    len(env.df),
+        "message": (
+            "Trigger POST /baseline to run the live inference agent. "
+            "Results appear in the HF Space Logs tab."
+        )
     }
 
 

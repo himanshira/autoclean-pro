@@ -4,141 +4,229 @@ emoji: 🧹
 colorFrom: blue
 colorTo: green
 sdk: docker
-sdk_version: "3.10"
-python_version: "3.10"
-app_file: server/app.py
 pinned: false
+short_description: RL environment for autonomous data cleaning with HITL governance
 ---
+
 # AutoClean-Pro: Hardware-Aware Data Governance
 
-## Motivation
+**[Try the live API](https://himanshirawat0892-autoclean-pro.hf.space/docs)**
 
-In real-world AI pipelines, data cleaning consumes 80% of engineer time. The RL environments currently are more focused on toy games; AutoClean-Pro evaluates if an AI agent can autonomously transform "raw, messy" data into "ML-ready" features while adhering to strict Data Governance standards.
+Data cleaning consumes 80% of ML engineer time. AutoClean-Pro is an OpenEnv RL environment where LLM agents learn to autonomously clean messy tabular datasets — deciding when to impute missing values statistically and when to escalate to a human reviewer under strict governance rules.
 
-Our environment tests the "Decision Intelligence" of an agent knowing when to automate (impute) versus when to escalate to a human (flag), simulating a high-stakes AI infrastructure where incorrect data entry can lead to hardware-level failures.
+The key innovation is **Adaptive Bayesian Weighting**: missingness scores are amplified in scarce datasets (≤50 rows) where a single missing value carries disproportionate statistical risk — modelling real-world scenarios like rare disease registries, clinical trials, and sensor failure logs.
 
 ---
 
-## Action & Observation Spaces
+## How an Episode Works
 
-### Action Space (Discrete)
+1. `POST /reset?task_id=easy` — loads a dirty CSV and returns an observation
+2. The agent reads `missing_report` (Bayesian-weighted missingness per column) and `schema_info`
+3. `POST /step` — agent applies a cleaning tool to one column
+4. Each step returns reward, updated observation, and done flag
+5. `GET /grader` — deterministic score against ground-truth clean data
 
-The agent interacts with the data via a suite of specialized tools:
+### Example: Easy Task
 
-| Tool | Description |
+```
+Observation after reset:
+  missing_report: {"Age": 0.28, "Clicks": 0.14}
+  weighting_mode: "bayesian_scarce"
+  dataset_regime: "scarce_10rows"
+
+Step 1: median_impute(Age)   → reward: +2.00  (score improves)
+Step 2: median_impute(Clicks) → reward: +0.50  done=true
+Grader: score=0.999  success=true
+```
+
+### Example: Hard Task (Governance)
+
+```
+Observation after reset:
+  missing_report: {"Survey_Response": 0.42, "Income_k": 0.28}
+  weighting_mode: "bayesian_scarce"
+
+Survey_Response has 40% missing → agent MUST flag_human (not impute)
+Any imputation attempt → penalty: -5.0 reward
+
+Step 1: flag_human(Survey_Response) → reward: +2.00
+Step 2: finish                       → done=true
+Grader: score=0.999  success=true
+```
+
+---
+
+## Adaptive Bayesian Weighting
+
+The core technical innovation. Standard environments report flat missingness (1 missing / 10 rows = 10%). AutoClean-Pro amplifies scores for scarce datasets:
+
+```
+amplification = 1 + (threshold - n) / (threshold × 2)
+  n=10, threshold=50 → amp = 1.40
+
+weighted_pct = flat_pct × amplification
+```
+
+**Tool selection preserved across dataset sizes:**
+
+| Missing / 10 rows | Flat % | Weighted % | Tool |
+|---|---|---|---|
+| 1 / 10 | 0.10 | 0.14 | `median_impute` |
+| 2 / 10 | 0.20 | 0.28 | `knn_impute` |
+| 3 / 10 | 0.30 | 0.42 | `flag_human` |
+
+On a 1000-row dataset, 3 missing = 0.003 → `median_impute`. On a 10-row rare disease dataset, the same count escalates to human review. The amplification captures this real-world difference.
+
+**Three configurable modes:**
+
+| Mode | Behaviour |
 |---|---|
-| `knn_impute` | k-Nearest Neighbours imputation (numeric columns only) |
-| `mode_impute` | Statistical mode imputation for categorical/object columns |
-| `median_impute` | Statistical median imputation for numeric columns |
-| `cast_type` | Schema alignment (e.g., String → Float) |
-| `flag_human` | The Governance Tool. Required when data integrity is compromised (≥35% missing) |
-| `finish` | Submits the final dataset for grading |
-
-### Observation Space (JSON)
-
-The agent receives a rich state representation:
-
-- **`data_preview`**: A 5-row window of the current dataframe (List of Records).
-- **`missing_report`**: A Bayesian-weighted dictionary of null importance per column (values 0.0–1.0).
-- **`schema_info`**: Current data types (e.g., `float64`, `object`) to prevent type-mismatch errors.
-- **`message`**: Direct feedback from the environment (e.g., `"Median impute on Age."` or `"Column flagged for manual review."`).
+| `auto` | Detects dataset size, applies amplification for n ≤ 50 |
+| `on` | Always amplifies — for clinical / rare-event datasets |
+| `off` | Flat proportion — standard behaviour for large datasets |
 
 ---
 
-## Technical Innovation: Bayesian Missingness & Governance
+## Agent: Chain-of-Thought with Guided Self-Consistency
 
-### Bayesian-Weighted Reporting
+The inference agent uses **CoT with guided self-consistency** rather than a single greedy call:
 
-We apply a Bayesian weight to null counts to prevent "Small-Dataset Noise." In micro-datasets, a single missing value can disproportionately skew the Data Health Score. Our weighted approach ensures the agent isn't over-reacting to isolated gaps in smaller columns.
+1. Sample 3 LLM responses (temperature=0.0 for first, 0.3 for diversity)
+2. Each response produces `<think>...</think>` reasoning + JSON action
+3. Select the best action by: `urgency_score + 0.3 × consensus`
+   - `urgency` = `missing_report[column]` from the environment
+   - `consensus` = fraction of samples agreeing on (tool, column)
 
-Row weights are stored as `np.ndarray` and computed in `_update_weights()`. Rows containing any NaN receive a decayed weight (`row_weight < 1.0`), while fully-populated rows receive weight `1.0`. The `get_weighted_missing_report()` function in `logic.py` uses these weights to produce the per-column missingness scores seen in the observation.
+This prevents the most common failure mode — the LLM choosing a clean column when dirty ones remain — while using environmental signal (not majority vote alone) as the tie-breaker.
 
-### The 35% Governance Rule (HITL)
-
-Located in `logic.py` (`calculate_cleaning_gain`), this acts as a hard gatekeeper.
-
-**Policy:** If a column has ≥ 35% weighted missingness, any attempt to automate via imputation is heavily penalized (−5.0 reward).
-
-**Requirement:** The agent must use `flag_human` to flag the column for manual review, mirroring real-world compliance where statistical guessing on high-volume gaps is prohibited.
+The system prompt is **built dynamically** from the observation, explaining to the LLM which weighting mode is active and what the amplified scores mean, so it can reason correctly about a score of `0.14` in scarce mode vs standard mode.
 
 ---
 
-## Deterministic Grader Design
+## Tool Registry
 
-Our environment uses a **Dual-Criteria Grader** to ensure scientific reproducibility:
+Tools self-register via decorator — the environment never hardcodes tool names:
 
-**Mathematical Fidelity (`easy` / `medium` tasks):** Compares imputed results against ground-truth clean data using `np.isclose` with `rtol=0.02` (2% relative tolerance). This accounts for floating-point variance across different hardware (CPU vs TPU) without penalizing the agent for small rounding differences — e.g., a median-imputed value of `22.75` vs a target of `22.5` is treated as correct.
+```python
+@ToolRegistry.register("median_impute")
+def _median_impute(df, col, params):
+    s = pd.to_numeric(df[col], errors="coerce")
+    df.loc[:, col] = s.fillna(s.median())
+    return df, f"Median impute on '{col}'."
+```
 
-**Governance Alignment (`hard` task):** The grader checks whether `flag_human` was called at least once during the episode (`"flag_human" in self.history`). If the agent never escalates a column with ≥ 35% missingness, the score is `0.0`. Successful escalation returns `1.0`. The grader does **not** modify the column values — the governance check is behavioural, not textual.
-
-The grader accepts a `silent=True` parameter (used by `inference.py` in the `finally` block) which suppresses all output, keeping `stdout` strictly clean for the validator.
-
----
-
-## Baseline Inference (`inference.py`)
-
-The baseline uses a **fully deterministic priority chain** — no LLM calls required. The agent follows a strict decision tree applied to the observation's `missing_report` and `schema_info` on every step:
-
-| Priority | Condition | Action |
-|---|---|---|
-| P0 | Hard task and `flag_human` already used | `finish` |
-| P1 | Known numeric column has dtype `object` | `cast_type` → `float64` |
-| P2 | Any column has weighted missingness ≥ 0.35 | `flag_human` |
-| P3 | Object/string column has any missing values | `mode_impute` |
-| P4 | Numeric column has any missing values | `median_impute` (highest missingness first) |
-| P5 | All missingness scores are zero | `finish` |
-
-This produces the following verified step sequences:
-
-- **Easy** (Age: 3 NaNs, Clicks: 1 NaN): `median_impute(Age)` → `median_impute(Clicks)` → `done=true, success=true`
-- **Medium** (Price: 2 NaNs as object, Category: 2 NaNs): `cast_type(Price)` → `median_impute(Price)` → `mode_impute(Category)` → `done=true, success=true`
-- **Hard** (Survey_Response: 40% NaN): `flag_human(Survey_Response)` → `finish` → `done=true, success=true`
-
-The `OpenAI` Python client is still initialised (using `API_BASE_URL` and `HF_TOKEN`) to satisfy the hackathon's infrastructure requirement, even though the deterministic agent does not make LLM calls.
+New tools can be added without modifying `AutoCleanEnv`. The agent discovers available tools from `GET /tools` at runtime.
 
 ---
 
-## System Architecture & Middleware
+## Tasks
 
-AutoClean-Pro is engineered for **High-Availability and Interoperability** with a Hardware-Aware philosophy, specifically optimized for high-throughput, low-latency execution on constrained **2 vCPU / 8 GB RAM** environments:
+3 tasks across difficulty levels. All use real CSV data.
 
-- **CORS Middleware:** Enabled to allow cross-origin requests from remote AI agents and external monitoring dashboards.
-- **Request Logging:** Custom middleware tracks agent "Think Time" and ensures the 15-step limit is strictly enforced at the API layer.
-- **Error Handling:** Global exception handlers prevent server crashes during multi-mode evaluation, ensuring the environment remains responsive even if an agent sends a malformed action.
-- **Green AI Efficiency:** By minimising the computational footprint of the cleaning agents, we reduce the energy overhead per data repair task.
-- **Modular API Design:** Utilising a FastAPI backend to ensure environment resets and step executions are decoupled from inference.
-- **Inference Engine:** Utilising `Qwen/Qwen2.5-7B-Instruct` via the Hugging Face Inference API, accessible through the OpenAI-compatible router at `https://router.huggingface.co/v1/`.
+| Task | Dataset | Key challenge | Success threshold |
+|---|---|---|---|
+| `easy` | 10 rows, 2 numeric cols, 4 NaNs | Median impute both columns | score > 0.98 |
+| `medium` | 10 rows, mixed types, 4 NaNs | Cast + median + mode impute | score > 0.98 |
+| `hard` | 10 rows, 40% Survey_Response missing | Governance: must flag_human | score > 0.99 |
 
 ---
 
-## Reward Shaping: Dense Signal and Policy Alignment
-
-We utilise a non-binary reward function to provide a dense signal throughout the trajectory, guiding the agent toward the 100% accuracy target:
+## Reward Shaping
 
 ```
 Reward = ΔQuality + RarityBonus − RepetitionPenalty
 ```
 
-| Component | Description |
+| Component | Value |
 |---|---|
-| **Cleaning Gain (ΔQuality)** | Positive reward proportional to the percentage of NaNs removed, weighted by Bayesian row weights |
-| **Governance Rule** | +2.0 reward for correctly using `flag_human` on a column with ≥ 35% missingness; −5.0 for imputing such a column |
-| **Rarity Bonus** | +0.1 for using diverse tools; −2.0 penalty for repeating the same tool back-to-back |
-| **Accuracy Bonus** | +1.0 if the newly imputed values exactly match the ground-truth target |
+| Cleaning gain (ΔQuality) | Proportional to NaNs removed, strategy-aligned bonus |
+| flag_human on ≥35% column | +2.0 |
+| Imputing a ≥35% column | −5.0 |
+| Exact match with ground truth | +1.0 |
+| Diverse tool usage | +0.1 |
+| Back-to-back same tool | −2.0 |
+
+Scores are clamped to (0.001, 0.999) — strictly open interval as required.
 
 ---
 
-## Setup and Usage
+## Architecture
+![alt text](autoclean_system_architecture.svg)
+
+### BaseEnv Pattern
+
+```python
+class BaseCleanEnv(ABC):
+    @abstractmethod
+    def reset(self) -> Observation: ...
+    @abstractmethod
+    def step(self, action: Action) -> Dict: ...
+    @abstractmethod
+    def grader(self, silent: bool = False) -> float: ...
+    @property
+    @abstractmethod
+    def state(self) -> EpisodeState: ...
+```
+
+`AutoCleanEnv` inherits `BaseCleanEnv`. Column names are discovered dynamically from the loaded CSV — nothing is hardcoded.
+
+### EpisodeState
+
+OpenEnv-compatible state contract with `episode_id` + `step_count`, plus Bayesian context:
+
+```json
+{
+  "episode_id": "uuid",
+  "step_count": 2,
+  "weighting_mode": "bayesian_scarce",
+  "dataset_regime": "scarce_10rows",
+  "history": ["median_impute", "median_impute"]
+}
+```
+
+---
+
+## API Reference
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | GET | Health check — returns 200 for validator |
+| `/reset` | POST | Start episode. Params: `task_id`, `bayesian_mode`, `scarce_threshold` |
+| `/step` | POST | Execute action: `{"tool": "...", "column": "...", "params": {}}` |
+| `/grader` | GET | Deterministic score + weighting context |
+| `/state` | GET | Full EpisodeState — OpenEnv compatible |
+| `/tools` | GET | Live tool registry — agent can discover tools at runtime |
+| `/baseline` | POST | Run `inference.py` in background; output in Logs tab |
+| `/docs` | GET | Interactive Swagger UI |
+
+---
+
+## Setup and Running
 
 ```bash
-# Install dependencies using uv
-uv sync && uv lock
+# Install dependencies
+uv sync
 
-# Start the FastAPI server (Port 7860)
-python -m server.app
+# Start the API server (port 7860)
+uv run uvicorn server.app:app --host 0.0.0.0 --port 7860
 
-# Run the reproducible inference
-python inference.py
+# Run the inference agent
+uv run python inference.py
+```
+
+### Expected inference output
+
+```
+[START] task=easy env=autoclean_benchmark model=Qwen/Qwen2.5-7B-Instruct
+[STEP] step=1 action={"tool":"median_impute","column":"Age","params":{}} reward=2.00 done=false error=null
+[STEP] step=2 action={"tool":"median_impute","column":"Clicks","params":{}} reward=0.50 done=true error=null
+[END] success=true steps=2 rewards=2.00,0.50 score=0.9990
+
+[START] task=medium ...
+[END] success=true steps=3 rewards=... score=0.9990
+
+[START] task=hard ...
+[END] success=true steps=2 rewards=2.00,0.00 score=0.9990
 ```
 
 ---
@@ -146,16 +234,13 @@ python inference.py
 ## Project Structure
 
 ```
-├── data/               # Dirty and clean CSV pairs
-│   ├── easy_dirty.csv / easy_clean.csv
-│   ├── med_dirty.csv  / med_clean.csv
-│   └── hard_dirty.csv / hard_clean.csv
+├── data/               # Dirty and clean CSV pairs (6 files)
 ├── server/
-│   └── app.py          # FastAPI entry point (Port 7860)
-├── environment.py      # Core RL logic, grader, and tool execution
-├── logic.py            # Bayesian weighting, reward functions, governance rule
-├── models.py           # Pydantic V2 schemas (Action, Observation)
-├── inference.py        # Reproducible inference script
-├── pyproject.toml      # Project metadata & entry points
-└── openenv.yaml        # OpenEnv specification file
+│   └── app.py          # FastAPI + Gradio UI (port 7860)
+├── environment.py      # BaseCleanEnv + AutoCleanEnv + ToolRegistry
+├── logic.py            # Adaptive Bayesian weighting + reward functions
+├── models.py           # Pydantic V2 schemas (Action, Observation, State)
+├── inference.py        # CoT + guided self-consistency agent
+├── pyproject.toml      # Dependencies (uv)
+└── openenv.yaml        # OpenEnv spec
 ```

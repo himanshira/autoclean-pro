@@ -1,11 +1,11 @@
 Product_ID,Price,Category
 101,19.99,Tech
 102,25.50,Home
-103,NaN,Tech
+103,Missing,Tech
 104,15.00,
 105,30.00,Home
 106,18.50,Home
 107,20.00,Home
-108,Nan,
+108,Missing,Tech
 109,32.50,Tech
 110,40.00,Home
