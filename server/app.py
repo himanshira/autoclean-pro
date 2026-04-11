@@ -212,61 +212,88 @@ async def download_clean_csv(task_id: str = "easy"):
 
 
 @app.post("/agent")
-async def run_agent(
-    background_tasks: BackgroundTasks,
-    task_id: str = "easy",
-):
+async def run_agent(task_id: str = "easy"):
     """
-    Run the LLM agent autonomously against any active task — including
-    custom uploaded CSVs. The agent reads the observation, reasons via
-    CoT self-consistency, picks the right tool, and cleans the dataset
-    without any manual tool selection.
+    Run the LLM agent IN-PROCESS against any active task — including
+    custom uploaded CSVs.
+
+    This is self-contained: the agent runs inside THIS request on THIS
+    replica, using the same env object that /upload or /reset created.
+    No subprocess, no HTTP hops, no cross-replica session loss.
 
     Workflow:
-      1. POST /upload   (or POST /reset?task_id=easy/medium/hard)
-      2. POST /agent?task_id=custom   ← agent cleans automatically
-      3. GET  /grader?task_id=custom  ← see the score
-      4. GET  /download?task_id=custom ← download cleaned CSV
-
-    Output appears in the HF Space Logs tab as [START]/[STEP]/[END].
+      1. POST /upload           → uploads CSV, initialises env
+      2. POST /agent?task_id=custom  → agent cleans autonomously
+      3. GET  /grader?task_id=custom → see the score
+      4. GET  /download?task_id=custom → download cleaned CSV
     """
-    if task_id not in envs and task_id not in VALID_TASKS:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task '{task_id}' not initialised. POST /reset or /upload first."
-        )
+    import importlib
+    import inference as inf_module
+    importlib.reload(inf_module)   # pick up any env changes
 
-    def run_agent_task():
-        try:
-            proc = subprocess.run(
-                ["uv", "run", "python", "inference.py", task_id],
-                text=True,
-                capture_output=True,
-                cwd="/app",
-                env={**__import__("os").environ, "AGENT_TASK": task_id},
-            )
-            if proc.stdout:
-                sys.stderr.write(f"[AGENT:{task_id.upper()} STDOUT]\n" + proc.stdout)
-                sys.stderr.flush()
-            if proc.stderr:
-                sys.stderr.write(f"[AGENT:{task_id.upper()} STDERR]\n" + proc.stderr)
-                sys.stderr.flush()
-            if proc.returncode != 0:
-                sys.stderr.write(f"[AGENT] exited with code {proc.returncode}\n")
-                sys.stderr.flush()
-        except Exception as e:
-            sys.stderr.write(f"[AGENT CRASH] {e}\n")
-            sys.stderr.flush()
+    env = _get_env(task_id)        # raises 404 if not initialised
 
-    background_tasks.add_task(run_agent_task)
-    return {
-        "status":      f"Agent started for task '{task_id}' in background.",
-        "instruction": "Monitor the HF Space Logs tab for [START]/[STEP]/[END] output.",
+    obs        = _sanitise(env.reset())
+    rewards    = []
+    steps      = 0
+    flag_done  = False
+    log_lines  = []
+
+    obs_dict = obs if isinstance(obs, dict) else (
+        obs.model_dump() if hasattr(obs, "model_dump") else dict(obs)
+    )
+
+    for step_idx in range(1, env.step_limit + 1):
+        steps = step_idx
+        action_dict = inf_module.get_agent_action(env, obs_dict, flag_done)
+
+        if action_dict.get("tool") == "flag_human":
+            flag_done = True
+
+        result   = _sanitise(env.step(Action(**action_dict)))
+        reward   = float(result.get("reward", 0.0))
+        done     = bool(result.get("done", False))
+        obs_dict = result.get("observation", {})
+        if hasattr(obs_dict, "model_dump"):
+            obs_dict = obs_dict.model_dump()
+        err      = result.get("info", {}).get("last_action_error")
+
+        line = (f"[STEP] step={step_idx} "
+                f"action={__import__('json').dumps(action_dict, separators=(',',':'))} "
+                f"reward={reward:.2f} done={str(done).lower()} "
+                f"error={err or 'null'}")
+        log_lines.append(line)
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+        rewards.append(reward)
+
+        if done:
+            break
+
+    raw_score   = env.grader(silent=True)
+    score       = max(0.001, min(0.999, float(raw_score)))
+    success     = score > 0.99 if task_id == "hard" else (
+                  score > 0.90 if task_id == "custom" else score > 0.98)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+
+    end_line = (f"[END] success={str(success).lower()} steps={steps} "
+                f"score={score:.2f} rewards={rewards_str}")
+    log_lines.append(end_line)
+    sys.stderr.write(end_line + "\n")
+    sys.stderr.flush()
+
+    return _sanitise({
+        "status":  "Agent completed.",
+        "success": success,
+        "steps":   steps,
+        "score":   score,
+        "rewards": rewards,
+        "log":     log_lines,
         "next_steps": {
             "score":    f"GET /grader?task_id={task_id}",
             "download": f"GET /download?task_id={task_id}",
         },
-    }
+    })
 
 
 @app.post("/baseline")
