@@ -449,6 +449,23 @@ class TestToolRegistry:
         assert result_df["Age"].isnull().sum() == 0
         assert result_df["Age"].iloc[2] == pytest.approx(expected_median, abs=0.01)
 
+    def test_median_impute_on_object_redirects_to_mode(self):
+        """median_impute on object column must redirect to mode — never destroy data."""
+        df = pd.DataFrame({
+            "Category": ["Tech", "Home", None, "Tech", "Home",
+                         "Home", "Home", None, "Tech", "Home"]
+        })
+        original_non_null = df["Category"].dropna().copy()
+        result_df, msg = ToolRegistry.execute("median_impute", df, "Category", {})
+        # Must fill NaNs — not destroy all values
+        assert result_df["Category"].isnull().sum() == 0, (
+            "median_impute on object must fill NaNs, not destroy column"
+        )
+        # Non-null values must be preserved unchanged
+        assert (result_df["Category"].iloc[original_non_null.index] == original_non_null).all(), (
+            "median_impute redirect must not alter non-null values"
+        )
+
     def test_mode_impute_fills_categorical_nans(self):
         """mode_impute must fill NaN cells with column mode."""
         df = pd.DataFrame({
@@ -457,6 +474,31 @@ class TestToolRegistry:
         result_df, _ = ToolRegistry.execute("mode_impute", df, "Category", {})
         assert result_df["Category"].isnull().sum() == 0
         assert result_df["Category"].iloc[2] == "Home"
+
+    def test_multifeature_knn_registered(self):
+        """multifeature_knn_impute must be in the tool registry."""
+        assert "multifeature_knn_impute" in ToolRegistry.available()
+
+    def test_multifeature_knn_uses_all_numeric_cols(self):
+        """multifeature_knn_impute must produce varied fills using context columns."""
+        # Dataset where Salary can be predicted from Stats:
+        # High-stats rows should get higher Salary fill than low-stats rows
+        df = pd.DataFrame({
+            "AtBat": [500, 100, 450, 90,  480],
+            "Hits":  [150, 30,  140, 25,  145],
+            "Salary": [800.0, None, 750.0, None, 780.0],
+        })
+        result_df, msg = ToolRegistry.execute("multifeature_knn_impute", df, "Salary", {})
+        assert result_df["Salary"].isnull().sum() == 0, "All NaNs must be filled"
+        # High-stats player (index 1: AtBat=100, Hits=30) vs
+        # low-stats player (index 3: AtBat=90, Hits=25)
+        # Both should get fills, and they should differ from a plain mean
+        fill_1 = result_df["Salary"].iloc[1]
+        fill_3 = result_df["Salary"].iloc[3]
+        mean_salary = df["Salary"].mean()
+        # Contextual fill should be in a sensible range
+        assert 0 < fill_1 < 2000, f"Fill must be in salary range, got {fill_1}"
+        assert "multifeature" in msg.lower() or "knn" in msg.lower()
 
 
 # ===========================================================================

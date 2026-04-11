@@ -101,9 +101,23 @@ def _cast_type(df: pd.DataFrame, col: str, params: Dict):
 @ToolRegistry.register("median_impute")
 def _median_impute(df: pd.DataFrame, col: str, params: Dict):
     df = df.copy()
+    # Guard: if column is object/str and can't be parsed as numeric,
+    # redirect to mode_impute to prevent destroying the column with NaN.
+    if df[col].dtype == object or str(df[col].dtype) in ("str","string"):
+        modes = df[col].mode()
+        fill = modes.iloc[0] if not modes.empty else ""
+        df.loc[:, col] = df[col].fillna(fill)
+        return df, (
+            f"median_impute redirected to mode_impute on object column '{col}'. "
+            f"Use mode_impute directly for categorical columns."
+        )
     s = pd.to_numeric(df[col], errors="coerce")
-    df.loc[:, col] = s.fillna(s.median())
-    return df, f"Median impute on '{col}'."
+    median_val = s.median()
+    if pd.isna(median_val):
+        # All values unparseable — do nothing rather than destroy the column
+        return df, f"median_impute skipped '{col}': no parseable numeric values."
+    df.loc[:, col] = s.fillna(median_val)
+    return df, f"Median impute on '{col}' (median={median_val:.4g})."
 
 
 @ToolRegistry.register("mode_impute")
@@ -130,6 +144,54 @@ def _knn_impute(df: pd.DataFrame, col: str, params: Dict):
     imputed = KNNImputer(n_neighbors=k).fit_transform(vals).flatten()
     df.loc[:, col] = imputed
     return df, f"KNN impute (k={k}) on '{col}'."
+
+
+@ToolRegistry.register("multifeature_knn_impute")
+def _multifeature_knn_impute(df: pd.DataFrame, col: str, params: Dict):
+    """
+    Multi-feature KNN imputation for large datasets.
+    Uses ALL numeric columns as neighbours, not just the target column.
+    This gives contextually accurate fills: e.g. Salary predicted from
+    AtBat, Hits, Years, etc. rather than just from other Salary values.
+
+    Recommended when n > 50 rows and multiple numeric features exist.
+    Falls back to single-column knn_impute if only one numeric column present.
+    """
+    df = df.copy()
+
+    # Collect all numeric columns (excluding the target temporarily)
+    numeric_cols = [
+        c for c in df.columns
+        if np.issubdtype(df[c].dtype, np.number) or
+           pd.to_numeric(df[c], errors="coerce").notna().any()
+    ]
+
+    if len(numeric_cols) < 2:
+        # Only one numeric column — fall back to single-column KNN
+        s = pd.to_numeric(df[col], errors="coerce")
+        vals = s.values.reshape(-1, 1)
+        imputed = KNNImputer(n_neighbors=min(5, int(s.notna().sum()))).fit_transform(vals)
+        df.loc[:, col] = imputed.flatten()
+        return df, f"multifeature_knn_impute fell back to single-column KNN on '{col}' (only 1 numeric col)."
+
+    # Build numeric matrix from all numeric columns
+    num_df = pd.DataFrame({
+        c: pd.to_numeric(df[c], errors="coerce") for c in numeric_cols
+    })
+
+    k = int(params.get("n_neighbors", 5))
+    k = min(k, int(num_df[col].notna().sum()))  # never exceed available rows
+
+    imputed_matrix = KNNImputer(n_neighbors=k).fit_transform(num_df)
+    imputed_df = pd.DataFrame(imputed_matrix, columns=numeric_cols, index=df.index)
+
+    # Only update the target column
+    df.loc[:, col] = imputed_df[col]
+    n_features = len(numeric_cols)
+    return df, (
+        f"Multi-feature KNN (k={k}, {n_features} features) imputed '{col}'. "
+        f"Features used: {numeric_cols[:5]}{'...' if n_features > 5 else ''}."
+    )
 
 
 @ToolRegistry.register("fillna")

@@ -83,11 +83,11 @@ weighted_pct = flat_pct
 | 3 / 10 | 0.30 | 0.34 (capped) | `knn_impute` |
 | 4 / 10 | 0.40 | 0.40 (governance) | `flag_human` |
 
-**Three configurable modes:**
+**Three configurable modes** (set via `bayesian_mode` param on `/reset` or `/upload`):
 
 | Mode | Behaviour |
 |---|---|
-| `auto` | Detects dataset size, applies amplification for n ≤ 50 |
+| `auto` | Detects dataset size; amplifies for n ≤ 50, flat for n > 50 |
 | `on` | Always amplifies — for clinical / rare-event datasets |
 | `off` | Flat proportion — standard behaviour for large datasets |
 
@@ -120,6 +120,19 @@ def _knn_impute(df, col, params):
 ```
 
 New tools require only a decorated function — no changes to `AutoCleanEnv`. The agent discovers available tools from `GET /tools` at runtime.
+
+**Available tools:**
+
+| Tool | Use when |
+|---|---|
+| `knn_impute` | Numeric, score 0.15–0.34, **scarce** dataset (≤50 rows) |
+| `multifeature_knn_impute` | Numeric, score 0.15–0.34, **large** dataset (>50 rows) |
+| `median_impute` | Numeric, score < 0.15, continuous values |
+| `mode_impute` | Categorical column, or binary numeric |
+| `cast_type` | Object column with numeric name (price, salary, income) |
+| `flag_human` | Any column with score ≥ 0.35 — too risky to impute |
+| `fillna` | Fill with a specific literal value |
+| `finish` | Signal that cleaning is complete |
 
 ---
 
@@ -159,7 +172,7 @@ Scores clamped to `(0.001, 0.999)` — strictly open interval as required by the
 
 ## Architecture
 
-![Architecture diagram](autoclean_system_architecture.svg)
+![Architecture diagram](https://raw.githubusercontent.com/himanshira/autoclean-pro/main/autoclean_system_architecture.svg)
 
 ### BaseEnv Pattern
 
@@ -220,9 +233,20 @@ uv sync
 # Start the API server (port 7860)
 uv run uvicorn server.app:app --host 0.0.0.0 --port 7860
 
-# Run the inference agent
+# Run the inference agent (set required env vars first)
+export HF_TOKEN=hf_your_token_here
+export API_BASE_URL=https://router.huggingface.co/v1/
+export MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
 uv run python inference.py
 ```
+
+**Environment variables** (required for inference agent):
+
+| Variable | Description | Default |
+|---|---|---|
+| `HF_TOKEN` / `API_KEY` | HuggingFace or LiteLLM API key | — (required) |
+| `API_BASE_URL` | LLM endpoint URL | `https://api.openai.com/v1` |
+| `MODEL_NAME` | Model identifier | `Qwen/Qwen2.5-7B-Instruct` |
 
 ### Expected inference output
 
@@ -340,13 +364,14 @@ curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" 
   -o hitters_cleaned.csv
 ```
 
-> **Note on imputation quality:** The agent uses single-column KNN imputation.
-> For small datasets (≤50 rows) this works well because Bayesian weighting
-> amplifies the signal from each missing cell. For large datasets like Hitters
-> (322 rows), single-column KNN produces a mean-equivalent fill — all missing
-> cells receive the same value (the mean of non-null values). This is statistically
-> valid but not as precise as multi-feature KNN. A future upgrade will use
-> all available numeric columns as KNN features for uploaded datasets.
+> **Imputation modes by dataset size:**
+> For **small datasets (≤50 rows)** the agent uses `knn_impute` with Bayesian
+> amplification — each missing cell is weighted by scarcity context.
+> For **large datasets (>50 rows)** the agent automatically uses `multifeature_knn_impute`
+> which uses ALL numeric columns as neighbours (e.g. Salary predicted from AtBat,
+> Hits, Years, RBI, etc.) giving contextually accurate fills rather than a
+> mean-equivalent value. The `dataset_regime` field in the observation tells
+> you which mode is active: `scarce_Nrows` or `standard_Nrows`.
 
 ## Project Structure
 
@@ -359,7 +384,26 @@ curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" 
 ├── models.py              # Pydantic V2 schemas (Action, Observation, State)
 ├── inference.py           # CoT + guided self-consistency agent
 ├── generate_data.py       # Synthetic dataset generator
+├── test_autoclean.py      # 50 unit tests (reward hacking, grader, Bayesian)
 ├── pyproject.toml         # Dependencies (uv)
 ├── openenv.yaml           # OpenEnv spec
 └── .gitattributes         # Line ending normalization (LF)
 ```
+
+## Testing
+
+50 unit tests covering reward hacking prevention, grader accuracy, Bayesian weighting correctness, and environment state management:
+
+```bash
+uv run python -m pytest test_autoclean.py -v
+```
+
+| Test class | Tests | What it guards |
+|---|---|---|
+| `TestRewardHacking` | 12 | Imputing governance columns, double-flagging, ID column farming, repetition gaming |
+| `TestGraderLogic` | 8 | Score accuracy, partial credit, strict (0,1) clamping |
+| `TestBayesianWeighting` | 8 | Amplification, governance cap at 0.34, sentinel string detection |
+| `TestEnvironmentState` | 7 | Episode ID rotation, flagged_cols zeroing, history tracking |
+| `TestToolRegistry` | 5 | All 7 tools registered, unknown tool raises, knn redirect on object |
+| `TestObservationContract` | 5 | Required fields, weighting_mode correctness, score range |
+| `TestEpisodeBoundaries` | 5 | step_limit, done flag, reward type contract |

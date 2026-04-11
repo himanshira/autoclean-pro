@@ -215,25 +215,33 @@ STEP 3: Choose tool for TARGET:
       After flagging, that column score becomes 0. Next step: go to STEP 1.
       *** dtype=object does NOT change this. Survey_Response=0.40 → flag_human ***
 
-  [B] TARGET dtype is object/str:
-      → Name sounds numeric? (price/cost/income/salary/amount/rate/value/revenue)
-        YES → cast_type {{"tool":"cast_type","column":"TARGET","params":{{"target_dtype":"float64"}}}}
-        NO  → mode_impute {{"tool":"mode_impute","column":"TARGET","params":{{}}}}
+  [B] TARGET dtype is object/str — decide by column name:
+      NUMERIC NAMES (price/cost/income/salary/amount/rate/value/revenue/score/total):
+        → cast_type {{"tool":"cast_type","column":"TARGET","params":{{"target_dtype":"float64"}}}}
+        *** ALWAYS cast_type for these names. NEVER mode_impute. No exceptions. ***
+        *** 'Price' dtype=object ALWAYS means cast_type, regardless of score. ***
+      CATEGORICAL NAMES (category/type/label/status/response/league/division/region):
+        → mode_impute {{"tool":"mode_impute","column":"TARGET","params":{{}}}}
       *** knn_impute is NEVER valid for object/str columns ***
 
   [C] TARGET dtype is numeric (float64/int64):
-      → score 0.15–0.34 → knn_impute {{"tool":"knn_impute","column":"TARGET","params":{{}}}}
+      → score 0.15–0.34 AND dataset_regime contains "standard" (n > 50 rows):
+          → {{"tool":"multifeature_knn_impute","column":"TARGET","params":{{}}}}
+            (uses ALL numeric columns as features — far better than single-column KNN)
+      → score 0.15–0.34 AND dataset_regime contains "scarce" (n ≤ 50 rows):
+          → {{"tool":"knn_impute","column":"TARGET","params":{{}}}}
       → score 0.00–0.14 → check if all non-null values are 0 or 1:
           YES (binary) → mode_impute  {{"tool":"mode_impute","column":"TARGET","params":{{}}}}
           NO (continuous) → median_impute {{"tool":"median_impute","column":"TARGET","params":{{}}}}
 
 FEW-SHOT EXAMPLES (these are the exact columns you will see — use these patterns):
-  Survey_Response score=0.40 dtype=str   → [A] flag_human     (≥0.35, always flag)
-  Income_k        score=0.28 dtype=float → [C] knn_impute     (numeric, 0.15-0.34)
-  Age             score=0.34 dtype=float → [C] knn_impute     (numeric, 0.15-0.34)
-  Price           score=0.28 dtype=str   → [B] cast_type      (numeric-named object)
-  Category        score=0.14 dtype=str   → [B] mode_impute    (categorical-named object)
-  Clicks          score=0.14 dtype=float → [C] median_impute  (numeric, 0.00-0.14)
+  Survey_Response score=0.40 dtype=str   regime=scarce   → [A] flag_human              (≥0.35)
+  Income_k        score=0.28 dtype=float regime=scarce   → [C] knn_impute              (scarce, 0.15-0.34)
+  Age             score=0.34 dtype=float regime=scarce   → [C] knn_impute              (scarce, 0.15-0.34)
+  Salary          score=0.18 dtype=float regime=standard → [C] multifeature_knn_impute (large dataset)
+  Price           score=0.28 dtype=str   regime=any      → [B] cast_type  *** Price is ALWAYS cast_type, NEVER mode_impute ***
+  Category        score=0.14 dtype=str   regime=any      → [B] mode_impute             (categorical-named object)
+  Clicks          score=0.14 dtype=float regime=scarce   → [C] median_impute           (numeric, 0.00-0.14)
 
 OUTPUT: one JSON on a new line, nothing else after </think>:
 {{"tool": "<tool>", "column": "<col>", "params": {{}}}}"""

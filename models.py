@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional, Literal
 # Strict allow-list keeps the agent on track and prevents hallucinated tool names
 ToolType = Literal[
     "knn_impute",
+    "multifeature_knn_impute",   # large datasets (n>50): uses all numeric cols
     "median_impute",
     "mode_impute",
     "flag_human",
@@ -14,7 +15,7 @@ ToolType = Literal[
 
 
 class Action(BaseModel):
-    tool: ToolType   # was: tool: str
+    tool:   str
     column: Optional[str]           = None
     params: Optional[Dict[str, Any]] = {}
 
