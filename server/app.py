@@ -184,6 +184,26 @@ async def upload_and_reset(
     }
 
 
+@app.get("/grade/{task_id}")
+async def grade_task(task_id: str):
+    """
+    Grade endpoint matching Discord OpenEnv spec format.
+    Path: /grade/easy  /grade/medium  /grade/hard
+    Returns score strictly in (0.001, 0.999).
+    """
+    if task_id not in VALID_TASKS or task_id == "custom":
+        raise HTTPException(status_code=404, detail=f"Unknown task '{task_id}'.")
+    env   = _get_env(task_id)
+    raw   = env.grader(silent=True)
+    score = max(0.001, min(0.999, float(raw)))
+    return _sanitise({
+        "score":   score,
+        "reward":  score,
+        "success": (score > 0.99) if task_id == "hard" else (score > 0.98),
+        "task_id": task_id,
+    })
+
+
 @app.get("/tools")
 async def list_tools():
     """Live tool registry — agents discover available tools at runtime."""

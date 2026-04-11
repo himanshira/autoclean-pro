@@ -1,14 +1,28 @@
-# openenv.yaml
+spec_version: 1
 name: autoclean-pro
 version: "1.0.0"
-description: >
-  A hardware-aware data cleaning RL environment with Human-in-the-Loop
-  governance. An agent autonomously imputes missing values or escalates
-  to a human reviewer, evaluated against ground-truth clean datasets.
+description: "Hardware-aware data cleaning RL environment with HITL governance"
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
 
-base_url: "http://localhost:7860"
+tasks:
+  - id: easy
+    description: "Impute missing values in a 10-row numeric dataset using knn and median imputation"
+    difficulty: easy
+    grader: grade/easy
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+  - id: medium
+    description: "Repair schema (cast_type) then impute mixed-type dataset with knn and mode imputation"
+    difficulty: medium
+    grader: grade/medium
+
+  - id: hard
+    description: "Governance task — flag Survey_Response (40% missing) then impute Income_k"
+    difficulty: hard
+    grader: grade/hard
+
 endpoints:
   reset:
     method: POST
@@ -21,17 +35,6 @@ endpoints:
     response:
       observation:
         type: object
-        properties:
-          data_preview:
-            type: array
-          missing_report:
-            type: object
-          schema_info:
-            type: object
-          total_rows:
-            type: integer
-          message:
-            type: string
       info:
         type: object
 
@@ -46,7 +49,7 @@ endpoints:
     body:
       tool:
         type: string
-        enum: [knn_impute, median_impute, mode_impute, flag_human, fillna, cast_type, finish]
+        enum: [knn_impute, multifeature_knn_impute, median_impute, mode_impute, flag_human, fillna, cast_type, finish]
       column:
         type: string
         nullable: true
@@ -60,15 +63,8 @@ endpoints:
         type: number
       done:
         type: boolean
-      success:
-        type: boolean
       info:
         type: object
-        properties:
-          success:
-            type: boolean
-          last_action_error:
-            type: string
 
   grader:
     method: GET
@@ -83,103 +79,40 @@ endpoints:
         type: string
       score:
         type: number
-        minimum: 0.0
-        maximum: 1.0
+        minimum: 0.001
+        maximum: 0.999
       success:
         type: boolean
 
-# ── Tasks ─────────────────────────────────────────────────────────────────────
-tasks:
-  easy:
-    description: >
-      Tabular dataset with 2 numeric columns (Age, Clicks) and 4 missing values.
-      Agent must impute all NaNs using median_impute to reach >98% accuracy.
-    dirty_data: data/easy_dirty.csv
-    clean_data: data/easy_clean.csv
-    step_limit: 15
-    success_threshold: 0.98
-    columns:
-      - name: User_ID
-        dtype: int64
-        missing: 0
-      - name: Age
-        dtype: float64
-        missing: 3
-      - name: Clicks
-        dtype: float64
-        missing: 1
-
-  medium:
-    description: >
-      Tabular dataset with a mixed-type issue (Price stored as object due to
-      'Nan' string values) and a categorical column (Category). Agent must
-      cast_type Price, then median_impute Price, then mode_impute Category.
-    dirty_data: data/med_dirty.csv
-    clean_data: data/med_clean.csv
-    step_limit: 15
-    success_threshold: 0.98
-    columns:
-      - name: Product_ID
-        dtype: int64
-        missing: 0
-      - name: Price
-        dtype: object
-        missing: 2
-        note: loaded as object due to 'Nan' string in source CSV
-      - name: Category
-        dtype: object
-        missing: 2
-
-  hard:
-    description: >
-      Governance task. Survey_Response has 40% missing values, above the 35%
-      HITL threshold. Agent MUST use flag_human (not impute). Grader returns
-      1.0 if flag_human appears in the episode history, 0.0 otherwise.
-      Imputing a column with >=35% missingness incurs a -5.0 reward penalty.
-    dirty_data: data/hard_dirty.csv
-    clean_data: data/hard_clean.csv
-    step_limit: 15
-    success_threshold: 1.0
-    columns:
-      - name: Customer_ID
-        dtype: int64
-        missing: 0
-      - name: Income_k
-        dtype: float64
-        missing: 2
-        note: 20% missing — can be imputed
-      - name: Survey_Response
-        dtype: object
-        missing: 4
-        note: 40% missing — must use flag_human
-
-# ── Action Space ──────────────────────────────────────────────────────────────
 action_space:
   type: discrete
   actions:
     knn_impute:
-      description: k-Nearest Neighbours imputation. Numeric columns only.
+      description: Single-column KNN imputation. Numeric columns, scarce datasets (n<=50).
+      params:
+        n_neighbors:
+          type: integer
+          default: 5
+    multifeature_knn_impute:
+      description: Multi-feature KNN imputation. Uses all numeric columns. Large datasets (n>50).
       params:
         n_neighbors:
           type: integer
           default: 5
     median_impute:
-      description: Fill NaNs with column median. Numeric columns only.
+      description: Fill NaNs with column median. Numeric columns, score < 0.15.
       params: {}
     mode_impute:
       description: Fill NaNs with column mode. Categorical/object columns.
       params: {}
     cast_type:
-      description: Cast column dtype, e.g. object to float64.
+      description: Cast column dtype from object to numeric.
       params:
         target_dtype:
           type: string
           default: float64
     flag_human:
-      description: >
-        Governance tool. Flags a column for human review.
-        Required when weighted missingness >= 35%. Reward +2.0.
-        Penalised -5.0 if any imputation tool is used on a >=35% column.
+      description: Flag column for human review. Required when weighted missingness >= 0.35.
       params: {}
     fillna:
       description: Fill NaNs with a literal value.
@@ -191,34 +124,36 @@ action_space:
       description: Submit the cleaned dataset for final grading.
       params: {}
 
-# ── Observation Space ─────────────────────────────────────────────────────────
 observation_space:
   type: json
   fields:
     data_preview:
       type: array
-      description: First 5 rows of the current dataframe as a list of records.
+      description: First 5 rows of the current dataframe.
     missing_report:
       type: object
-      description: >
-        Bayesian-weighted missingness score per column (0.0 = clean, 1.0 = fully missing).
-        ID-like columns are zeroed out so the agent ignores them.
+      description: Bayesian-weighted missingness score per column (0.0=clean).
     schema_info:
       type: object
-      description: Current dtype per column, e.g. Age is float64, Category is object.
+      description: Current dtype per column.
     total_rows:
       type: integer
-      description: Number of rows in the dataset.
     message:
       type: string
-      description: Last action feedback from the environment.
+    weighting_mode:
+      type: string
+      description: "bayesian_scarce or standard_uniform"
+    dataset_regime:
+      type: string
+      description: "e.g. scarce_10rows or standard_322rows"
+    available_tools:
+      type: array
+      description: Live tool registry snapshot.
 
-# ── Reward Structure ──────────────────────────────────────────────────────────
 reward:
-  formula: "DeltaQuality + RarityBonus - RepetitionPenalty"
+  formula: "DeltaQuality + StrategyBonus + AccuracyBonus + RarityBonus - Penalties"
   components:
     cleaning_gain:
-      description: Proportional to NaNs removed, weighted by Bayesian row weights.
       range: [-1.0, 2.0]
     governance:
       flag_human_correct: 2.0
@@ -229,8 +164,7 @@ reward:
     accuracy_bonus:
       exact_match: 1.0
 
-# ── Runtime Constraints ───────────────────────────────────────────────────────
-runtime:
+constraints:
   max_steps_per_episode: 15
   hardware_target:
     vcpu: 2
