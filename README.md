@@ -215,7 +215,8 @@ OpenEnv-compatible state with `episode_id` + `step_count`, plus Bayesian context
 | `/` | GET | Health check — returns 200 for validator |
 | `/reset` | POST | Start episode. Params: `task_id`, `bayesian_mode`, `scarce_threshold` |
 | `/step` | POST | Execute action: `{"tool": "...", "column": "...", "params": {}}` |
-| `/grader` | GET | Deterministic score + weighting context |
+| `/grade/{task_id}` | GET | **OpenEnv spec grader** — called by validator. Returns `{score, reward}` strictly in (0.001, 0.999). Paths: `/grade/easy`, `/grade/medium`, `/grade/hard` |
+| `/grader` | GET | **Debug grader** — same score plus `weighting_mode` and `dataset_regime` context. Useful for manual testing |
 | `/state` | GET | Full `EpisodeState` — OpenEnv compatible |
 | `/tools` | GET | Live tool registry — agent discovers tools at runtime |
 | `/upload` | POST | Upload any CSV — Bayesian cleaning without ground truth |
