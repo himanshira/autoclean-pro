@@ -247,6 +247,107 @@ uv run python inference.py
 
 ---
 
+
+---
+
+## How to Use — Manual Cleaning Workflow
+
+You can clean any messy CSV through the live API without writing code. Use the Swagger UI at [`/docs`](https://himanshirawat0892-autoclean-pro.hf.space/docs) or the curl commands below.
+
+### Step 1 — Upload your CSV
+
+```bash
+curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/upload" \
+  -F "file=@your_data.csv;type=text/csv"
+```
+
+The response tells you which columns are dirty and what tools to use:
+
+```json
+{
+  "observation": {
+    "missing_report": {"Salary": 0.183},
+    "schema_info":    {"Salary": "float64"},
+    "weighting_mode": "standard_uniform",
+    "dataset_regime": "standard_322rows"
+  },
+  "info": {
+    "task_id": "custom",
+    "missing_total": 59,
+    "note": "Use POST /step?task_id=custom to clean this dataset."
+  }
+}
+```
+
+### Step 2 — Read the missing report and pick a tool
+
+| Score | Band | Tool to use |
+|---|---|---|
+| ≥ 0.35 | Governance | `flag_human` — too risky to impute |
+| 0.15 – 0.34 | Significant | `knn_impute` |
+| 0.00 – 0.14 | Small gap | `median_impute` (numeric) or `mode_impute` (categorical) |
+| dtype=object, numeric name | Schema mismatch | `cast_type` first, then impute |
+
+### Step 3 — Apply cleaning steps
+
+```bash
+# Impute Salary (score=0.183 → knn_impute)
+curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/step?task_id=custom" \
+  -H "Content-Type: application/json" \
+  -d '{"tool":"knn_impute","column":"Salary","params":{}}'
+```
+
+Repeat for each dirty column until all `missing_report` scores are 0.0.
+
+### Step 4 — Check your score
+
+```bash
+curl "https://himanshirawat0892-autoclean-pro.hf.space/grader?task_id=custom"
+```
+
+Returns a score between 0 and 1 based on the fraction of dirty cells now filled.
+
+### Step 5 — Download the cleaned CSV
+
+```bash
+curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" \
+  -o my_data_cleaned.csv
+```
+
+The file contains your original data with all imputed values filled in.
+
+---
+
+### Full example: Hitters baseball salary dataset
+
+```bash
+# 1. Upload
+curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/upload" \
+  -F "file=@Hitters.csv;type=text/csv"
+# → Salary: 59/322 missing (18.3%) → score=0.183 → knn_impute
+
+# 2. Impute Salary
+curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/step?task_id=custom" \
+  -H "Content-Type: application/json" \
+  -d '{"tool":"knn_impute","column":"Salary","params":{}}'
+
+# 3. Score
+curl "https://himanshirawat0892-autoclean-pro.hf.space/grader?task_id=custom"
+# → {"score": 0.999, "success": true}
+
+# 4. Download
+curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" \
+  -o hitters_cleaned.csv
+```
+
+> **Note on imputation quality:** The agent uses single-column KNN imputation.
+> For small datasets (≤50 rows) this works well because Bayesian weighting
+> amplifies the signal from each missing cell. For large datasets like Hitters
+> (322 rows), single-column KNN produces a mean-equivalent fill — all missing
+> cells receive the same value (the mean of non-null values). This is statistically
+> valid but not as precise as multi-feature KNN. A future upgrade will use
+> all available numeric columns as KNN features for uploaded datasets.
+
 ## Project Structure
 
 ```
