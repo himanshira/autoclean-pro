@@ -75,8 +75,8 @@ def log_step(step: int, action_str: str, reward: float,
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float],
-            score: float = 0.0) -> None:
+def log_end(success: bool, steps: int, score: float,
+            rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else ""
     print(
         f"[END] success={str(success).lower()} steps={steps} "
@@ -541,7 +541,7 @@ def run_task(task_id: str) -> None:
         if env is not None:
             success, final_score = evaluate_success(env)
             env.close()
-        log_end(success, steps, rewards, final_score)
+        log_end(success, steps, final_score, rewards)
 
 
 # ---------------------------------------------------------------------------
