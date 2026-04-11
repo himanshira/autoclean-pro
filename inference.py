@@ -548,10 +548,106 @@ def run_task(task_id: str) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# API-mode runner — uses the live HTTP server
+# Used by /agent endpoint so the agent works on an already-uploaded CSV
+# ---------------------------------------------------------------------------
+
+def run_task_via_api(task_id: str, base_url: str = "http://localhost:7860") -> None:
+    """
+    Run the agent against the live HTTP server instead of creating a
+    local AutoCleanEnv. This allows the agent to work on datasets that
+    were uploaded via POST /upload — the server already holds their state.
+
+    Flow: GET /state → loop { GET obs → LLM decides → POST /step } → GET /grader
+    """
+    import urllib.request, urllib.error
+
+    def api_get(path: str) -> Dict:
+        url = f"{base_url}{path}"
+        req = urllib.request.Request(url, headers={"accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    def api_post(path: str, body: Dict = None) -> Dict:
+        url  = f"{base_url}{path}"
+        data = json.dumps(body or {}).encode()
+        req  = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json", "accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    rewards: List[float] = []
+    steps = 0
+    flag_human_done = False
+
+    log_start(task_id, "autoclean_benchmark", MODEL_NAME)
+
+    try:
+        # Use existing server state (already reset by /upload or /reset)
+        state_resp = api_get(f"/state?task_id={task_id}")
+        # Get fresh observation by calling /reset to get initial obs
+        # (non-destructive if the env is custom — re-reads the same CSV)
+        reset_resp = api_post(f"/reset?task_id={task_id}")
+        obs = reset_resp.get("observation", {})
+
+        for step_idx in range(1, 16):
+            steps = step_idx
+            # Build a minimal env-like object — obs already contains
+            # weighting_mode and dataset_regime so no local env needed
+            class _FakeEnv:
+                task_id = task_id
+                class state:
+                    weighting_mode = obs.get("weighting_mode", "standard_uniform")
+                    dataset_regime = obs.get("dataset_regime", "unknown")
+
+            action_dict = get_agent_action(_FakeEnv(), obs, flag_human_done)
+
+            if action_dict.get("tool") == "flag_human":
+                flag_human_done = True
+
+            result = api_post(f"/step?task_id={task_id}", action_dict)
+
+            reward = float(result.get("reward", 0.0))
+            done   = bool(result.get("done", False))
+            obs    = result.get("observation", {})
+            if hasattr(obs, "items"):
+                pass  # already dict
+            err    = result.get("info", {}).get("last_action_error")
+
+            log_step(step_idx, json.dumps(action_dict, separators=(",", ":")),
+                     reward, done, err)
+            rewards.append(reward)
+
+            if done:
+                break
+
+        grader_resp = api_get(f"/grader?task_id={task_id}")
+        score   = float(grader_resp.get("score", 0.0))
+        success = bool(grader_resp.get("success", False))
+
+    except Exception as exc:
+        sys.stderr.write(f"[ERROR] run_task_via_api({task_id}): {exc}\n")
+        sys.stderr.flush()
+        score, success = 0.0, False
+
+    log_end(success, steps, rewards, score)
+
+
 if __name__ == "__main__":
     warmup_llm_proxy()   # Phase 2: register proxy usage
 
-    if len(sys.argv) > 1:
+    # API_MODE: used by /agent endpoint — runs against live server
+    # so the agent works on already-uploaded custom CSVs
+    api_mode = os.getenv("AGENT_API_MODE", "false").lower() == "true"
+    base_url = os.getenv("AGENT_BASE_URL", "http://localhost:7860")
+
+    if api_mode and len(sys.argv) > 1:
+        run_task_via_api(sys.argv[1], base_url)
+    elif len(sys.argv) > 1:
         run_task(sys.argv[1])
     else:
         for task in ["easy", "medium", "hard"]:

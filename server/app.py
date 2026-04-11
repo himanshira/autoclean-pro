@@ -211,6 +211,64 @@ async def download_clean_csv(task_id: str = "easy"):
     )
 
 
+@app.post("/agent")
+async def run_agent(
+    background_tasks: BackgroundTasks,
+    task_id: str = "easy",
+):
+    """
+    Run the LLM agent autonomously against any active task — including
+    custom uploaded CSVs. The agent reads the observation, reasons via
+    CoT self-consistency, picks the right tool, and cleans the dataset
+    without any manual tool selection.
+
+    Workflow:
+      1. POST /upload   (or POST /reset?task_id=easy/medium/hard)
+      2. POST /agent?task_id=custom   ← agent cleans automatically
+      3. GET  /grader?task_id=custom  ← see the score
+      4. GET  /download?task_id=custom ← download cleaned CSV
+
+    Output appears in the HF Space Logs tab as [START]/[STEP]/[END].
+    """
+    if task_id not in envs and task_id not in VALID_TASKS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task '{task_id}' not initialised. POST /reset or /upload first."
+        )
+
+    def run_agent_task():
+        try:
+            proc = subprocess.run(
+                ["uv", "run", "python", "inference.py", task_id],
+                text=True,
+                capture_output=True,
+                cwd="/app",
+                env={**__import__("os").environ, "AGENT_TASK": task_id},
+            )
+            if proc.stdout:
+                sys.stderr.write(f"[AGENT:{task_id.upper()} STDOUT]\n" + proc.stdout)
+                sys.stderr.flush()
+            if proc.stderr:
+                sys.stderr.write(f"[AGENT:{task_id.upper()} STDERR]\n" + proc.stderr)
+                sys.stderr.flush()
+            if proc.returncode != 0:
+                sys.stderr.write(f"[AGENT] exited with code {proc.returncode}\n")
+                sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[AGENT CRASH] {e}\n")
+            sys.stderr.flush()
+
+    background_tasks.add_task(run_agent_task)
+    return {
+        "status":      f"Agent started for task '{task_id}' in background.",
+        "instruction": "Monitor the HF Space Logs tab for [START]/[STEP]/[END] output.",
+        "next_steps": {
+            "score":    f"GET /grader?task_id={task_id}",
+            "download": f"GET /download?task_id={task_id}",
+        },
+    }
+
+
 @app.post("/baseline")
 async def trigger_baseline(background_tasks: BackgroundTasks):
     """Run inference.py in background. Output appears in HF Space Logs tab."""
