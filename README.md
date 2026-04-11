@@ -361,7 +361,7 @@ curl "https://himanshirawat0892-autoclean-pro.hf.space/grader?task_id=custom"
 
 # 4. Download
 curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" \
-  -o hitters_cleaned.csv
+  -o salary_cleaned.csv
 ```
 
 > **Imputation modes by dataset size:**
