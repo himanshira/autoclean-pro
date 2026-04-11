@@ -80,7 +80,7 @@ def log_end(success: bool, steps: int, rewards: List[float],
     rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else ""
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.2f} rewards={rewards_str}",
+        f"score={score:.4f} rewards={rewards_str}",
         flush=True,
     )
 
