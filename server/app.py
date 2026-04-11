@@ -4,6 +4,7 @@ import math
 import uvicorn
 import subprocess
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi.responses import StreamingResponse
 import io
 import tempfile
 from fastapi.middleware.cors import CORSMiddleware
@@ -187,6 +188,27 @@ async def upload_and_reset(
 async def list_tools():
     """Live tool registry — agents discover available tools at runtime."""
     return {"tools": ToolRegistry.available()}
+
+
+@app.get("/download")
+async def download_clean_csv(task_id: str = "easy"):
+    """
+    Download the current (cleaned) state of the dataset as a CSV file.
+    Works for all task_ids including 'custom' uploaded CSVs.
+    Call after /step to download the agent-cleaned version.
+    """
+    env = _get_env(task_id)
+    if env.df is None:
+        raise HTTPException(status_code=400, detail="No dataset loaded. POST /reset first.")
+
+    csv_bytes = env.df.to_csv(index=False).encode("utf-8")
+    filename  = f"autoclean_{task_id}_cleaned.csv"
+
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.post("/baseline")

@@ -28,6 +28,7 @@ test_official.py
 baseline.py
 test_api.py
 validate-submission.sh
+test_autoclean.py
 
 # Data generation script — data/ CSVs are committed and copied by COPY . .
 generate_data.py

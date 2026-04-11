@@ -34,3 +34,8 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 "*" = ["data/*.csv"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
