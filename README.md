@@ -219,8 +219,7 @@ OpenEnv-compatible state with `episode_id` + `step_count`, plus Bayesian context
 | `/state` | GET | Full `EpisodeState` — OpenEnv compatible |
 | `/tools` | GET | Live tool registry — agent discovers tools at runtime |
 | `/upload` | POST | Upload any CSV — Bayesian cleaning without ground truth |
-| `/agent` | POST | Run LLM agent autonomously on any task including uploaded CSVs |
-| `/baseline` | POST | Run `inference.py` on bundled tasks; output in HF Space Logs tab |
+| `/baseline` | POST | Run `inference.py` in background; output in HF Space Logs tab |
 | `/docs` | GET | Interactive Swagger UI |
 
 ---
@@ -304,23 +303,7 @@ The response tells you which columns are dirty and what tools to use:
 }
 ```
 
-### Step 2 — Let the agent clean it automatically (recommended)
-
-```bash
-curl -X POST "https://himanshirawat0892-autoclean-pro.hf.space/agent?task_id=custom"
-```
-
-The LLM agent reads the observation, reasons via Chain-of-Thought, picks the right tool for each column, and cleans the dataset automatically. Monitor the HF Space Logs tab for `[START]`/`[STEP]`/`[END]` output.
-
-Then skip to Step 4 (score) and Step 5 (download).
-
----
-
-### Step 2b — Or pick the tool manually
-
-Read the missing report and choose the right tool yourself:
-
-### Read the missing report and pick a tool
+### Step 2 — Read the missing report and pick a tool
 
 | Score | Band | Tool to use |
 |---|---|---|
@@ -378,7 +361,7 @@ curl "https://himanshirawat0892-autoclean-pro.hf.space/grader?task_id=custom"
 
 # 4. Download
 curl "https://himanshirawat0892-autoclean-pro.hf.space/download?task_id=custom" \
-  -o salary_cleaned.csv
+  -o hitters_cleaned.csv
 ```
 
 > **Imputation modes by dataset size:**
